@@ -1,5 +1,13 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
+//
+// PORTABILITY CONTRACT (see DECISIONS.md §2):
+//   - Dev datasource is SQLite; production swaps `provider` + `DATABASE_URL` (Postgres/MySQL).
+//   - No native `enum` types (unsupported on SQLite) — "enum" fields are String + a TS union
+//     defined in app/lib/crm/constants.ts. Allowed values are documented at each field.
+//   - JSON columns are String (store JSON.stringify) — see Activity.payload, Segment.criteria.
+//   - Money is a decimal String + currencyCode — never Decimal/Float.
+//   - No connector-specific native types (@db.Text etc.) while the SQLite provider is active.
 
 generator client {
   provider = "prisma-client-js"
@@ -10,9 +18,12 @@ generator client {
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Shopify session storage (scaffold model — do not remove)
+// ---------------------------------------------------------------------------
 model Session {
   id            String    @id
   shop          String
@@ -31,4 +42,192 @@ model Session {
   emailVerified Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+// ---------------------------------------------------------------------------
+// CRM models — every record is tenant-scoped by `shop` (shop domain) and indexed.
+// ---------------------------------------------------------------------------
+
+/// Read-mirror of a Shopify customer plus CRM augmentation.
+model Contact {
+  id                String   @id @default(cuid())
+  shop              String
+  shopifyCustomerId String // Shopify customer GID, e.g. "gid://shopify/Customer/123"
+
+  // Cached fields mirrored from Shopify for fast list/search/sort/filter.
+  firstName String?
+  lastName  String?
+  email     String?
+  phone     String?
+
+  // Lightweight cached spend signals (see DECISIONS.md §3) — for list filter/sort only.
+  // `amountSpent` is a non-authoritative Float cache key so the list can sort/filter spend
+  // numerically; the authoritative money value is fetched live on the detail page.
+  amountSpent  Float    @default(0)
+  currencyCode String?
+  ordersCount  Int      @default(0)
+  lastOrderAt  DateTime?
+
+  // CRM augmentation.
+  lifecycleStage String  @default("LEAD") // LEAD | PROSPECT | CUSTOMER | VIP | CHURNED (configurable)
+  ownerStaffId   String?
+  source         String?
+
+  lastSyncedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tags        ContactTag[]
+  notes       Note[]
+  activities  Activity[]
+  tasks       Task[]
+  messageLogs MessageLog[]
+
+  @@unique([shop, shopifyCustomerId])
+  @@index([shop])
+  @@index([shop, lifecycleStage])
+  @@index([shop, email])
+  @@index([shop, amountSpent])
+  @@index([shop, updatedAt])
+}
+
+model Tag {
+  id        String       @id @default(cuid())
+  shop      String
+  name      String
+  createdAt DateTime     @default(now())
+  contacts  ContactTag[]
+
+  @@unique([shop, name])
+  @@index([shop])
+}
+
+model ContactTag {
+  contactId String
+  tagId     String
+  shop      String
+  createdAt DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@index([tagId])
+  @@index([shop])
+}
+
+model Note {
+  id            String   @id @default(cuid())
+  shop          String
+  contactId     String
+  body          String
+  authorStaffId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([shop, contactId])
+}
+
+/// Timeline event. `type` is one of ActivityType (see constants). `payload` is JSON-as-String.
+model Activity {
+  id         String   @id @default(cuid())
+  shop       String
+  contactId  String
+  type       String // NOTE | EMAIL_SENT | SMS_SENT | ORDER_PLACED | STAGE_CHANGED | TASK | SYSTEM
+  payload    String? // JSON.stringify(...) — see app/lib/crm/activity helpers
+  occurredAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([shop, contactId, occurredAt])
+  @@index([shop, occurredAt])
+}
+
+model Task {
+  id             String    @id @default(cuid())
+  shop           String
+  contactId      String? // nullable — standalone tasks allowed
+  title          String
+  notes          String?
+  dueAt          DateTime?
+  status         String    @default("OPEN") // OPEN | DONE
+  assigneeStaffId String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([shop, status, dueAt])
+  @@index([shop, contactId])
+}
+
+/// Saved list filter/view. `criteria` is JSON-as-String describing the filter.
+model Segment {
+  id        String   @id @default(cuid())
+  shop      String
+  name      String
+  criteria  String // JSON.stringify(ContactFilter)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, name])
+  @@index([shop])
+}
+
+model MessageTemplate {
+  id        String   @id @default(cuid())
+  shop      String
+  name      String
+  channel   String // EMAIL | SMS
+  subject   String? // email only
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messageLogs MessageLog[]
+
+  @@index([shop, channel])
+}
+
+model MessageLog {
+  id                String   @id @default(cuid())
+  shop              String
+  contactId         String
+  channel           String // EMAIL | SMS
+  templateId        String?
+  subject           String?
+  bodySnapshot      String
+  status            String   @default("QUEUED") // QUEUED | SENT | FAILED
+  providerMessageId String?
+  error             String?
+  sentByStaffId     String?
+  createdAt         DateTime @default(now())
+
+  contact  Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  template MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([shop, contactId])
+  @@index([shop, createdAt])
+}
+
+model ShopSettings {
+  id   String @id @default(cuid())
+  shop String @unique
+
+  // Brevo BYOK — ciphertext only (AES-256-GCM "iv:tag:ciphertext" base64 bundle). Never plaintext.
+  brevoApiKeyEncrypted String?
+  brevoConnected       Boolean @default(false)
+  brevoAccountEmail    String? // validated account email, for display only
+  brevoSenderEmail     String?
+  brevoSenderName      String?
+  brevoSmsSender       String?
+
+  // Optional override of lifecycle stages (JSON-as-String array). Null => defaults.
+  lifecycleStages String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
