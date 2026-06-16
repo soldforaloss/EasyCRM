@@ -4,7 +4,7 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { Form, useFetcher, useLoaderData } from "react-router";
+import { Form, useFetcher, useLoaderData, useNavigate } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -134,6 +134,7 @@ export default function ContactsList() {
   const resyncFetcher = useFetcher<typeof action>();
   const segmentFetcher = useFetcher<typeof action>();
   const bulkFormRef = useRef<HTMLFormElement | null>(null);
+  const navigate = useNavigate();
 
   // Submit the bulk form (which contains the selected-row checkboxes) for a chosen action.
   function submitBulk(action: string) {
@@ -142,6 +143,20 @@ export default function ContactsList() {
     const fd = new FormData(form);
     fd.set("_action", action);
     bulkFetcher.submit(fd, { method: "post" });
+  }
+
+  // Navigate to the bulk-message composer with the checked contact ids.
+  function messageSelected() {
+    const form = bulkFormRef.current;
+    if (!form) return;
+    const ids = new FormData(form).getAll("contactId").map(String);
+    if (ids.length === 0) {
+      shopify.toast.show("Select at least one contact first.", { isError: true });
+      return;
+    }
+    const sp = new URLSearchParams();
+    ids.forEach((id) => sp.append("id", id));
+    navigate(`/app/contacts/bulk?${sp.toString()}`);
   }
 
   // Surface action results as toasts.
@@ -297,6 +312,12 @@ export default function ContactsList() {
                     <s-button href={`/app/contacts?${sp.toString()}`} variant="tertiary">
                       {seg.name}
                     </s-button>
+                    <s-button
+                      href={`/app/contacts/bulk?segment=${seg.id}`}
+                      variant="tertiary"
+                      icon="email"
+                      accessibilityLabel={`Message segment ${seg.name}`}
+                    />
                     <segmentFetcher.Form method="post">
                       <input type="hidden" name="_action" value="deleteSegment" />
                       <input type="hidden" name="segmentId" value={seg.id} />
@@ -416,6 +437,9 @@ export default function ContactsList() {
                   <s-text-field name="tagName" label="Add tag" placeholder="e.g. Wholesale" />
                   <s-button onClick={() => submitBulk("bulkTag")}>Add tag</s-button>
                 </s-stack>
+                <s-button variant="primary" onClick={messageSelected}>
+                  Message selected
+                </s-button>
               </s-stack>
             </s-box>
           </bulkFetcher.Form>

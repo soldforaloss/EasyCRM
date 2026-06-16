@@ -193,3 +193,23 @@ export async function resolveOwnedContactIds(
   });
   return rows.map((r) => r.id);
 }
+
+/** Count how many of the given contacts can receive email / valid SMS (for bulk summaries). */
+export async function getContactChannelCounts(
+  shop: string,
+  ids: string[],
+): Promise<{ withEmail: number; withValidPhone: number }> {
+  if (ids.length === 0) return { withEmail: 0, withValidPhone: 0 };
+  const rows = await prisma.contact.findMany({
+    where: { shop, id: { in: ids } },
+    select: { email: true, phone: true },
+  });
+  const { normalizeE164 } = await import("../phone");
+  let withEmail = 0;
+  let withValidPhone = 0;
+  for (const r of rows) {
+    if (r.email) withEmail += 1;
+    if (normalizeE164(r.phone).ok) withValidPhone += 1;
+  }
+  return { withEmail, withValidPhone };
+}

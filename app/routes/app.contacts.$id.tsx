@@ -23,15 +23,20 @@ import {
 import { addTagToContact, removeTagFromContact } from "../lib/crm/tags.server";
 import { createTask, listTasks, setTaskStatus } from "../lib/crm/tasks.server";
 import { fetchCustomerDetail } from "../lib/shopify/customers.server";
+import { buildMergeVarsMap, sendToContact } from "../lib/crm/messaging.server";
+import { listTemplates } from "../lib/crm/templates.server";
+import { getBrevoStatus } from "../lib/crm/settings.server";
 import {
   ACTIVITY_TYPE_META,
   LIFECYCLE_STAGES,
   LIFECYCLE_STAGE_META,
   isActivityType,
+  isChannel,
   type BadgeTone,
 } from "../lib/crm/constants";
 import { displayName, formatDate, formatDateTime, formatMoney } from "../lib/format";
 import { StageBadge, TaskStatusBadge } from "../components/badges";
+import { ComposeMessage } from "../components/compose";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
@@ -49,10 +54,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     liveError = error instanceof Error ? error.message : "Could not load live customer data.";
   }
 
-  const [notes, activities, tasks] = await Promise.all([
+  const [notes, activities, tasks, templates, brevoStatus, varsMap] = await Promise.all([
     listNotes(shop, contact.id),
     listActivities(shop, contact.id, 100),
     listTasks(shop, { contactId: contact.id }),
+    listTemplates(shop),
+    getBrevoStatus(shop),
+    buildMergeVarsMap(shop, [contact]),
   ]);
 
   const numericId = contact.shopifyCustomerId.split("/").pop();
@@ -87,6 +95,15 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       status: t.status,
       dueAt: t.dueAt,
     })),
+    templates: templates.map((t) => ({
+      id: t.id,
+      name: t.name,
+      channel: t.channel,
+      subject: t.subject,
+      body: t.body,
+    })),
+    brevoConnected: brevoStatus.connected,
+    previewVars: varsMap.get(contact.id) ?? {},
     shopifyCustomerUrl: `https://${shop}/admin/customers/${numericId}`,
     shop,
   };
@@ -135,6 +152,19 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           form.get("status") === "DONE" ? "DONE" : "OPEN",
         );
         return { ok: true, toast: "Task updated." };
+      case "sendMessage": {
+        const channel = String(form.get("channel") ?? "");
+        if (!isChannel(channel)) return { ok: false, toast: "Choose a channel." };
+        const outcome = await sendToContact(shop, {
+          contactId,
+          channel,
+          subject: String(form.get("subject") ?? ""),
+          body: String(form.get("body") ?? ""),
+        });
+        return outcome.ok
+          ? { ok: true, toast: "Message sent." }
+          : { ok: false, toast: outcome.error ?? "Send failed." };
+      }
       default:
         return { ok: false, toast: "Unknown action." };
     }
@@ -238,6 +268,28 @@ export default function ContactDetail() {
           <s-paragraph>{data.liveError}</s-paragraph>
         </s-banner>
       )}
+
+      {/* Send message ---------------------------------------------------- */}
+      <s-section heading="Send a message">
+        {data.brevoConnected ? (
+          <ComposeMessage
+            heading="Send a message"
+            canEmail={Boolean(contact.email)}
+            canSms={Boolean(contact.phone)}
+            previewVars={data.previewVars}
+            templates={data.templates}
+            actionValue="sendMessage"
+            submitLabel="Send message"
+          />
+        ) : (
+          <s-stack direction="block" gap="base">
+            <s-paragraph color="subdued">
+              Connect Brevo in Settings to send email and SMS to this contact.
+            </s-paragraph>
+            <s-button href="/app/settings">Go to Settings</s-button>
+          </s-stack>
+        )}
+      </s-section>
 
       {/* Order history -------------------------------------------------- */}
       <s-section heading="Order history">

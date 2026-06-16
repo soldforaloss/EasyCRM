@@ -179,6 +179,44 @@ async function writeLog(input: LogInput): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Test send (Settings page) — no contact / no MessageLog              */
+/* ------------------------------------------------------------------ */
+
+export async function sendTestMessage(
+  shop: string,
+  channel: Channel,
+  recipient: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const prep = await prepareSend(shop, channel);
+  if (!prep.ok) return { ok: false, error: prep.error };
+
+  if (channel === "EMAIL") {
+    const to = recipient.trim();
+    if (!to) return { ok: false, error: "Enter a test email address." };
+    const res = await sendBrevoEmail(prep.apiKey!, {
+      sender: { email: prep.senderEmail!, name: prep.senderName },
+      to: [{ email: to }],
+      subject: "Easy CRM test email",
+      htmlContent:
+        "<p>This is a test email from Easy CRM via Brevo. If you received it, your sending setup works. 🎉</p>",
+      textContent:
+        "This is a test email from Easy CRM via Brevo. If you received it, your sending setup works.",
+    });
+    return res.ok ? { ok: true } : { ok: false, error: res.error };
+  }
+
+  const phone = normalizeE164(recipient);
+  if (!phone.ok) return { ok: false, error: phone.reason };
+  const res = await sendBrevoSms(prep.apiKey!, {
+    sender: prep.smsSender!,
+    recipient: toBrevoSmsRecipient(phone.e164),
+    content: "Easy CRM test SMS — your Brevo setup works.",
+    type: "transactional",
+  });
+  return res.ok ? { ok: true } : { ok: false, error: res.error };
+}
+
+/* ------------------------------------------------------------------ */
 /* Single send                                                         */
 /* ------------------------------------------------------------------ */
 
