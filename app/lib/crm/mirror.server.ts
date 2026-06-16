@@ -59,20 +59,19 @@ export async function upsertContactFromWebhook(
   const gid = customerGid(payload);
   if (!gid) return;
 
-  // Only set mirrored fields. Never touch lifecycleStage / ownerStaffId / source / tags.
+  // Only mirror identity fields. Never touch lifecycleStage / ownerStaffId / source / tags.
+  //
+  // Spend signals (amountSpent / ordersCount / currencyCode) are intentionally NOT written here:
+  // Shopify removed total_spent / orders_count / last_order_* from the customer webhook payload
+  // (2025-01+), and mixing absolute writes with the orders/* increments below would let the
+  // cache drift. Spend is maintained by the install backfill (absolute) + orders/* increments.
+  // See DECISIONS.md §3.
   const mirrored = {
     firstName: payload.first_name ?? null,
     lastName: payload.last_name ?? null,
     email: payload.email ?? null,
     phone: payload.phone ?? null,
     lastSyncedAt: new Date(),
-    ...(payload.total_spent != null
-      ? { amountSpent: parseMoney(payload.total_spent) }
-      : {}),
-    ...(toInt(payload.orders_count) != null
-      ? { ordersCount: toInt(payload.orders_count)! }
-      : {}),
-    ...(payload.currency ? { currencyCode: payload.currency } : {}),
   };
 
   await prisma.contact.upsert({
@@ -123,25 +122,33 @@ export async function recordOrderFromWebhook(
       phone: customer.phone ?? null,
       lastSyncedAt: new Date(),
     },
-    select: { id: true },
+    select: { id: true, lastOrderAt: true },
   });
 
-  // Idempotency: skip if we've already logged this exact order.
-  const existing = await prisma.activity.findFirst({
-    where: { shop, contactId: contact.id, type: "ORDER_PLACED", payload: { contains: oGid } },
-    select: { id: true },
-  });
-  if (existing) return;
+  // Atomic idempotency: the unique (shop, orderGid) constraint means only the FIRST delivery of
+  // this order proceeds. This closes the orders/create + orders/paid race and the prefix-collision
+  // risk of a substring match — duplicate deliveries hit P2002 and no-op (no double-count, no
+  // duplicate timeline event).
+  try {
+    await prisma.processedOrder.create({
+      data: { shop, orderGid: oGid, contactId: contact.id },
+    });
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") return; // already processed
+    throw error;
+  }
 
   const total = parseMoney(payload.total_price);
   const occurredAt = payload.created_at ? new Date(payload.created_at) : new Date();
+  // Keep lastOrderAt monotonic — out-of-order webhook delivery must not regress it.
+  const advanceLastOrder = !contact.lastOrderAt || occurredAt > contact.lastOrderAt;
 
   await prisma.contact.update({
     where: { id: contact.id },
     data: {
       ordersCount: { increment: 1 },
       amountSpent: { increment: total },
-      lastOrderAt: occurredAt,
+      ...(advanceLastOrder ? { lastOrderAt: occurredAt } : {}),
       ...(payload.currency ? { currencyCode: payload.currency } : {}),
     },
   });

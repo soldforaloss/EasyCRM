@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -30,6 +30,7 @@ import type { ContactSortField } from "../lib/crm/types";
 import { displayName, formatDate, formatMoney } from "../lib/format";
 import { StageBadge } from "../components/badges";
 import { ConfirmAction } from "../components/confirm";
+import { useActionToast } from "../lib/use-action-toast";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -147,15 +148,10 @@ export default function ContactsList() {
     navigate(`/app/contacts/bulk?${sp.toString()}`);
   }
 
-  // Surface action results as toasts.
-  const lastToast = useRef<string | null>(null);
-  useEffect(() => {
-    const result = bulkFetcher.data ?? resyncFetcher.data ?? null;
-    if (result?.toast && result.toast !== lastToast.current) {
-      lastToast.current = result.toast;
-      shopify.toast.show(result.toast, result.ok ? {} : { isError: true });
-    }
-  }, [bulkFetcher.data, resyncFetcher.data, shopify]);
+  // Surface each action source's result as a toast independently (no `??` coalescing — a stale
+  // bulk result must not mask a later resync result, and identical repeats must still confirm).
+  useActionToast(bulkFetcher.data);
+  useActionToast(resyncFetcher.data);
 
   const { params } = data;
 

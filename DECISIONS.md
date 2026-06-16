@@ -64,7 +64,19 @@ maintained by backfill + `orders/*` webhooks, used only for fast list filter/sor
 page still shows live authoritative figures. `amountSpent` is a **`Float`** here (not the
 String used elsewhere for money): it is a non-authoritative, denormalized sort/filter key, and
 a String column would sort lexicographically. This is the one deliberate exception to the
-"money is a String" rule in §2 — it is never used for financial calculation, only ordering. Documented so the
+"money is a String" rule in §2 — it is never used for financial calculation, only ordering.
+
+**Spend-cache maintenance (revised after review):** the cache is maintained by exactly two
+paths — the install backfill (absolute, from GraphQL `amountSpent`/`numberOfOrders`) and
+`orders/create|paid` webhook **increments**. The `customers/create|update` webhook does **not**
+write spend signals: Shopify removed `total_spent`/`orders_count`/`last_order_*` from the customer
+webhook payload (2025-01+), and mixing absolute writes with increments would let the cache drift.
+Order webhooks are made idempotent by a dedicated **`ProcessedOrder`** table with a unique
+`(shop, orderGid)` constraint — the first delivery of an order GID "wins" (atomic insert),
+so concurrent `orders/create` + `orders/paid` deliveries can't double-count or duplicate the
+timeline event. `lastOrderAt` is advanced monotonically so out-of-order delivery can't regress it.
+The authoritative spend is always fetched live on the detail page, so cache drift (e.g. from
+refunds, which don't decrement) is cosmetic for list sort/filter only. Documented so the
 "spend is live" principle and the "filter by spend tier" requirement coexist coherently.
 
 ## 4. Scopes (minimal)

@@ -213,6 +213,20 @@ model MessageLog {
   @@index([shop, createdAt])
 }
 
+/// Dedup ledger for order webhooks: an atomic, exact-match idempotency lock keyed by order GID.
+/// The unique (shop, orderGid) constraint makes concurrent orders/create + orders/paid deliveries
+/// of the same order safe (only the first insert wins) — see DECISIONS.md §3.
+model ProcessedOrder {
+  id        String   @id @default(cuid())
+  shop      String
+  orderGid  String
+  contactId String
+  createdAt DateTime @default(now())
+
+  @@unique([shop, orderGid])
+  @@index([shop])
+}
+
 model ShopSettings {
   id   String @id @default(cuid())
   shop String @unique

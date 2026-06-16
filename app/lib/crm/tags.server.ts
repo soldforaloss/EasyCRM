@@ -51,7 +51,7 @@ export async function deleteTag(shop: string, tagId: string): Promise<void> {
   await prisma.tag.deleteMany({ where: { shop, id: tagId } });
 }
 
-/** Bulk-assign a tag (by name) to many contacts. Returns the number newly tagged. */
+/** Bulk-assign a tag (by name) to many contacts. Returns the number of contacts NEWLY tagged. */
 export async function addTagToContacts(
   shop: string,
   contactIds: string[],
@@ -63,14 +63,21 @@ export async function addTagToContacts(
     where: { shop, id: { in: contactIds } },
     select: { id: true },
   });
-  let count = 0;
-  for (const c of owned) {
-    const created = await prisma.contactTag.upsert({
-      where: { contactId_tagId: { contactId: c.id, tagId: tag.id } },
-      update: {},
-      create: { contactId: c.id, tagId: tag.id, shop },
+  const ownedIds = owned.map((c) => c.id);
+  if (ownedIds.length === 0) return 0;
+
+  // Determine which contacts don't already have the tag, so the returned count is accurate
+  // (upsert always returns a row, so it can't tell created vs. already-present).
+  const existing = await prisma.contactTag.findMany({
+    where: { tagId: tag.id, contactId: { in: ownedIds } },
+    select: { contactId: true },
+  });
+  const existingSet = new Set(existing.map((e) => e.contactId));
+  const toCreate = ownedIds.filter((id) => !existingSet.has(id));
+  if (toCreate.length > 0) {
+    await prisma.contactTag.createMany({
+      data: toCreate.map((contactId) => ({ contactId, tagId: tag.id, shop })),
     });
-    if (created) count += 1;
   }
-  return count;
+  return toCreate.length;
 }

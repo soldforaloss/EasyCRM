@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -12,7 +12,6 @@ import {
   useRouteError,
 } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { getContact, setLifecycleStage } from "../lib/crm/contacts.server";
 import { addNote, deleteNote, editNote, listNotes } from "../lib/crm/notes.server";
@@ -38,6 +37,7 @@ import { displayName, formatDate, formatDateTime, formatMoney } from "../lib/for
 import { StageBadge, TaskStatusBadge } from "../components/badges";
 import { ComposeMessage } from "../components/compose";
 import { ConfirmAction } from "../components/confirm";
+import { useActionToast } from "../lib/use-action-toast";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
@@ -215,16 +215,8 @@ function describeTimeline(item: {
 export default function ContactDetail() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
-  const shopify = useAppBridge();
   const { contact, live } = data;
-
-  const lastToast = useRef<string | null>(null);
-  useEffect(() => {
-    if (actionData?.toast && actionData.toast !== lastToast.current) {
-      lastToast.current = actionData.toast;
-      shopify.toast.show(actionData.toast, actionData.ok ? {} : { isError: true });
-    }
-  }, [actionData, shopify]);
+  useActionToast(actionData);
 
   // Live order history with "Load more" pagination via the orders resource route.
   const ordersFetcher = useFetcher<typeof ordersLoader>();
@@ -234,6 +226,13 @@ export default function ContactDetail() {
   const [cursor, setCursor] = useState(
     live?.orders.pageInfo ?? { hasNextPage: false, endCursor: null },
   );
+  // The detail route module is reused across contacts, so reset order pagination on contact change
+  // (otherwise contact B would show contact A's loaded-more orders and an invalid cursor).
+  useEffect(() => {
+    setExtraOrders([]);
+    setCursor(live?.orders.pageInfo ?? { hasNextPage: false, endCursor: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contact.id]);
   useEffect(() => {
     if (ordersFetcher.data?.orders) {
       setExtraOrders((prev) => [...prev, ...ordersFetcher.data!.orders]);

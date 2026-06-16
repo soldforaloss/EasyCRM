@@ -52,16 +52,18 @@ export async function buildMergeVarsMap(
   const ids = contacts.map((c) => c.id);
   const lastOrderByContact = new Map<string, { total?: string; currency?: string }>();
   if (ids.length > 0) {
+    // Fetch only the LATEST order per contact (not the whole batch's order history). `distinct`
+    // + leading `contactId` orderBy gives one deterministic row per contact (DISTINCT ON on
+    // Postgres). The secondary keys make the tiebreak deterministic for equal timestamps.
     const acts = await prisma.activity.findMany({
       where: { shop, type: "ORDER_PLACED", contactId: { in: ids } },
-      orderBy: { occurredAt: "desc" },
+      orderBy: [{ contactId: "asc" }, { occurredAt: "desc" }, { createdAt: "desc" }],
+      distinct: ["contactId"],
       select: { contactId: true, payload: true },
     });
     for (const a of acts) {
-      if (!lastOrderByContact.has(a.contactId)) {
-        const p = parseActivityPayload<{ total?: string; currency?: string }>(a);
-        lastOrderByContact.set(a.contactId, { total: p?.total, currency: p?.currency });
-      }
+      const p = parseActivityPayload<{ total?: string; currency?: string }>(a);
+      lastOrderByContact.set(a.contactId, { total: p?.total, currency: p?.currency });
     }
   }
 

@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -6,7 +5,6 @@ import type {
 } from "react-router";
 import { Form, useActionData, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
   createTask,
@@ -19,6 +17,7 @@ import {
 import { displayName, formatDate } from "../lib/format";
 import { TaskStatusBadge } from "../components/badges";
 import { ConfirmAction } from "../components/confirm";
+import { useActionToast } from "../lib/use-action-toast";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -153,14 +152,7 @@ function TaskGroup({ heading, tasks, tone }: { heading: string; tasks: TaskView[
 export default function TasksPage() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
-  const shopify = useAppBridge();
-  const lastToast = useRef<string | null>(null);
-  useEffect(() => {
-    if (actionData?.toast && actionData.toast !== lastToast.current) {
-      lastToast.current = actionData.toast;
-      shopify.toast.show(actionData.toast, actionData.ok ? {} : { isError: true });
-    }
-  }, [actionData, shopify]);
+  useActionToast(actionData);
 
   const empty =
     data.openCount === 0 && data.done.length === 0;
