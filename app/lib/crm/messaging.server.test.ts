@@ -39,11 +39,15 @@ const baseContact = {
 };
 
 function stubFetch(status: number, body: unknown) {
-  const fn = vi.fn(async (_url: string, _init: { body: string }) => ({
-    status,
-    headers: { get: () => null },
-    text: async () => JSON.stringify(body),
-  }));
+  const fn = vi.fn(async (url: string, init: { body: string }) => {
+    void url;
+    void init;
+    return {
+      status,
+      headers: { get: () => null },
+      text: async () => JSON.stringify(body),
+    };
+  });
   vi.stubGlobal("fetch", fn);
   return fn;
 }

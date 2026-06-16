@@ -37,6 +37,7 @@ import {
 import { displayName, formatDate, formatDateTime, formatMoney } from "../lib/format";
 import { StageBadge, TaskStatusBadge } from "../components/badges";
 import { ComposeMessage } from "../components/compose";
+import { ConfirmAction } from "../components/confirm";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
@@ -411,13 +412,14 @@ export default function ContactDetail() {
                     </s-stack>
                   </s-stack>
                 </Form>
-                <Form method="post">
-                  <input type="hidden" name="_action" value="deleteNote" />
-                  <input type="hidden" name="noteId" value={note.id} />
-                  <s-button type="submit" variant="tertiary" tone="critical">
-                    Delete note
-                  </s-button>
-                </Form>
+                <ConfirmAction
+                  id={`confirm-del-note-${note.id}`}
+                  triggerLabel="Delete note"
+                  heading="Delete note?"
+                  message="This note will be permanently removed."
+                  confirmLabel="Delete note"
+                  fields={{ _action: "deleteNote", noteId: note.id }}
+                />
               </s-stack>
             </s-box>
           ))}

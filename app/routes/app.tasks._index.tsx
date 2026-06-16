@@ -18,6 +18,7 @@ import {
 } from "../lib/crm/tasks.server";
 import { displayName, formatDate } from "../lib/format";
 import { TaskStatusBadge } from "../components/badges";
+import { ConfirmAction } from "../components/confirm";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -119,11 +120,15 @@ function TaskRow({ task }: { task: TaskView }) {
             {task.status === "DONE" ? "Reopen" : "Mark done"}
           </s-button>
         </Form>
-        <Form method="post">
-          <input type="hidden" name="_action" value="deleteTask" />
-          <input type="hidden" name="taskId" value={task.id} />
-          <s-button type="submit" variant="tertiary" tone="critical" icon="delete" accessibilityLabel="Delete task" />
-        </Form>
+        <ConfirmAction
+          id={`confirm-del-task-${task.id}`}
+          triggerIcon="delete"
+          triggerAccessibilityLabel="Delete task"
+          heading="Delete task?"
+          message={`The task “${task.title}” will be removed.`}
+          confirmLabel="Delete task"
+          fields={{ _action: "deleteTask", taskId: task.id }}
+        />
       </s-stack>
     </s-box>
   );
@@ -181,7 +186,8 @@ export default function TasksPage() {
       {empty && (
         <s-section heading="No tasks yet">
           <s-paragraph color="subdued">
-            Create a task above, or add one from a contact's page to keep follow-ups on track.
+            Create a task above, or add one from a contact&apos;s page to keep follow-ups on
+            track.
           </s-paragraph>
         </s-section>
       )}

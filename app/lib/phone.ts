@@ -26,9 +26,9 @@ export function isValidE164(value: string | null | undefined): boolean {
   return typeof value === "string" && E164_RE.test(value);
 }
 
-/** Remove spaces, dashes, dots, parentheses and non-breaking spaces. */
+/** Remove whitespace (incl. non-breaking), dashes, dots and parentheses. `\s` covers all whitespace. */
 function stripFormatting(input: string): string {
-  return input.replace(/[\s\-(). ]/g, "");
+  return input.replace(/[\s().-]/g, "");
 }
 
 /**
@@ -48,7 +48,7 @@ export function normalizeE164(
 
   let s = stripFormatting(String(input).trim());
 
-  // International access prefix "00" → "+".
+  // International access prefix "00" -> "+".
   if (s.startsWith("00")) {
     s = `+${s.slice(2)}`;
   }

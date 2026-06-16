@@ -10,7 +10,6 @@ import {
   type ContactFilter,
   type ContactListParams,
   type ContactSortField,
-  type SortDirection,
 } from "./types";
 
 export function parseContactListParams(

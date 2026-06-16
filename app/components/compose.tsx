@@ -54,7 +54,7 @@ export function ComposeMessage(props: ComposeProps) {
   const bodyPreview = renderMerge(body, props.previewVars);
   const missing = [...new Set([...subjectPreview.missing, ...bodyPreview.missing])];
 
-  function useTemplate(t: ComposeTemplate) {
+  function applyTemplate(t: ComposeTemplate) {
     setChannel(t.channel === "SMS" ? "SMS" : "EMAIL");
     setSubject(t.subject ?? "");
     setBody(t.body);
@@ -104,7 +104,7 @@ export function ComposeMessage(props: ComposeProps) {
           <s-text color="subdued">Start from a template:</s-text>
           <s-stack direction="inline" gap="small-200">
             {channelTemplates.map((t) => (
-              <s-button key={t.id} variant="tertiary" onClick={() => useTemplate(t)}>
+              <s-button key={t.id} variant="tertiary" onClick={() => applyTemplate(t)}>
                 {t.name}
               </s-button>
             ))}

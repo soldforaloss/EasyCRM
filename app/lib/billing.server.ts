@@ -29,6 +29,7 @@ export interface PlanGateResult {
  * Gate a request behind an active plan. No-op stub today (returns active=true).
  * Wire up the template's `billing.require` here when enabling billing.
  */
-export async function requireActivePlan(_request: Request): Promise<PlanGateResult> {
+export async function requireActivePlan(request: Request): Promise<PlanGateResult> {
+  void request; // unused until billing is enabled; see the integration notes above.
   return { active: true, bypassReason: "Billing is not enabled in this build." };
 }

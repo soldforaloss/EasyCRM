@@ -16,6 +16,7 @@ import {
 } from "../lib/crm/templates.server";
 import { MERGE_VARIABLES } from "../lib/crm/types";
 import { ChannelBadge } from "../components/badges";
+import { ConfirmAction } from "../components/confirm";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -137,13 +138,14 @@ export default function TemplatesPage() {
                   </s-stack>
                 </s-stack>
               </Form>
-              <Form method="post">
-                <input type="hidden" name="_action" value="deleteTemplate" />
-                <input type="hidden" name="id" value={t.id} />
-                <s-button type="submit" variant="tertiary" tone="critical">
-                  Delete template
-                </s-button>
-              </Form>
+              <ConfirmAction
+                id={`confirm-del-template-${t.id}`}
+                triggerLabel="Delete template"
+                heading="Delete template?"
+                message={`The template “${t.name}” will be permanently removed.`}
+                confirmLabel="Delete template"
+                fields={{ _action: "deleteTemplate", id: t.id }}
+              />
             </s-stack>
           </s-section>
         ))

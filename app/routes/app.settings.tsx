@@ -16,6 +16,7 @@ import {
 } from "../lib/crm/settings.server";
 import { sendTestMessage } from "../lib/crm/messaging.server";
 import { isChannel } from "../lib/crm/constants";
+import { ConfirmAction } from "../components/confirm";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -126,12 +127,14 @@ export default function SettingsPage() {
           </Form>
 
           {status.connected && (
-            <Form method="post">
-              <input type="hidden" name="_action" value="removeKey" />
-              <s-button type="submit" variant="tertiary" tone="critical">
-                Disconnect Brevo
-              </s-button>
-            </Form>
+            <ConfirmAction
+              id="confirm-disconnect-brevo"
+              triggerLabel="Disconnect Brevo"
+              heading="Disconnect Brevo?"
+              message="Your encrypted Brevo API key will be removed. You'll need to re-enter it to send messages again."
+              confirmLabel="Disconnect"
+              fields={{ _action: "removeKey" }}
+            />
           )}
         </s-stack>
       </s-section>

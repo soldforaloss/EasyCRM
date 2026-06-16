@@ -3,24 +3,32 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { countContacts, countContactsSince } from "../lib/crm/contacts.server";
-import { countOpenTasks } from "../lib/crm/tasks.server";
+import { countOpenTasks, groupTasks, listTasks } from "../lib/crm/tasks.server";
 import { getBrevoStatus } from "../lib/crm/settings.server";
 import { listRecentActivity } from "../lib/crm/activity.server";
 import { ACTIVITY_TYPE_META, isActivityType } from "../lib/crm/constants";
-import { displayName, formatRelativeDay } from "../lib/format";
+import { displayName, formatDate, formatRelativeDay } from "../lib/format";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
   const since = new Date(Date.now() - 30 * 86_400_000);
 
-  const [totalContacts, newContacts, openTasks, brevo, recent] = await Promise.all([
-    countContacts(shop),
-    countContactsSince(shop, since),
-    countOpenTasks(shop),
-    getBrevoStatus(shop),
-    listRecentActivity(shop, 8),
-  ]);
+  const [totalContacts, newContacts, openTasks, brevo, recent, openTaskList] =
+    await Promise.all([
+      countContacts(shop),
+      countContactsSince(shop, since),
+      countOpenTasks(shop),
+      getBrevoStatus(shop),
+      listRecentActivity(shop, 8),
+      listTasks(shop, { status: "OPEN" }),
+    ]);
+
+  const grouped = groupTasks(openTaskList);
+  const tasksDue = [
+    ...grouped.overdue.map((t) => ({ ...t, overdue: true })),
+    ...grouped.today.map((t) => ({ ...t, overdue: false })),
+  ].slice(0, 6);
 
   return {
     totalContacts,
@@ -33,6 +41,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       occurredAt: a.occurredAt,
       contactId: a.contactId,
       contactName: displayName(a.contact?.firstName, a.contact?.lastName, "A contact"),
+    })),
+    tasksDue: tasksDue.map((t) => ({
+      id: t.id,
+      title: t.title,
+      dueAt: t.dueAt,
+      overdue: t.overdue,
+      contactId: t.contactId,
     })),
   };
 };
@@ -66,7 +81,7 @@ function activityLabel(type: string): string {
 }
 
 export default function Dashboard() {
-  const { totalContacts, newContacts, openTasks, brevoConnected, recent } =
+  const { totalContacts, newContacts, openTasks, brevoConnected, recent, tasksDue } =
     useLoaderData<typeof loader>();
 
   return (
@@ -122,6 +137,35 @@ export default function Dashboard() {
                 </s-stack>
               </s-box>
             ))}
+          </s-stack>
+        )}
+      </s-section>
+
+      <s-section heading="Tasks due">
+        {tasksDue.length === 0 ? (
+          <s-paragraph color="subdued">
+            Nothing due right now. <s-link href="/app/tasks">View all tasks</s-link>.
+          </s-paragraph>
+        ) : (
+          <s-stack direction="block" gap="small-200">
+            {tasksDue.map((t) => (
+              <s-box key={t.id} padding="small-200" borderRadius="base" background="subdued">
+                <s-stack direction="inline" gap="base" alignItems="center">
+                  <s-badge tone={t.overdue ? "critical" : "caution"}>
+                    {t.overdue ? "Overdue" : "Today"}
+                  </s-badge>
+                  <s-stack direction="block" gap="small-500">
+                    {t.contactId ? (
+                      <s-link href={`/app/contacts/${t.contactId}`}>{t.title}</s-link>
+                    ) : (
+                      <s-text type="strong">{t.title}</s-text>
+                    )}
+                    {t.dueAt && <s-text color="subdued">Due {formatDate(t.dueAt)}</s-text>}
+                  </s-stack>
+                </s-stack>
+              </s-box>
+            ))}
+            <s-link href="/app/tasks">View all tasks</s-link>
           </s-stack>
         )}
       </s-section>

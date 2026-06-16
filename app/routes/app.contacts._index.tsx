@@ -20,7 +20,6 @@ import {
   contactListParamsToSearch,
   hasActiveFilter,
   parseContactListParams,
-  paramsToFilter,
 } from "../lib/crm/list-params";
 import {
   LIFECYCLE_STAGES,
@@ -30,6 +29,7 @@ import {
 import type { ContactSortField } from "../lib/crm/types";
 import { displayName, formatDate, formatMoney } from "../lib/format";
 import { StageBadge } from "../components/badges";
+import { ConfirmAction } from "../components/confirm";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -116,23 +116,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
-const SORT_LABELS: Record<ContactSortField, string> = {
-  name: "Name",
-  email: "Email",
-  createdAt: "Created",
-  updatedAt: "Updated",
-  amountSpent: "Spent",
-  ordersCount: "Orders",
-  lastOrderAt: "Last order",
-  lifecycleStage: "Stage",
-};
-
 export default function ContactsList() {
   const data = useLoaderData<typeof loader>();
   const shopify = useAppBridge();
   const bulkFetcher = useFetcher<typeof action>();
   const resyncFetcher = useFetcher<typeof action>();
-  const segmentFetcher = useFetcher<typeof action>();
   const bulkFormRef = useRef<HTMLFormElement | null>(null);
   const navigate = useNavigate();
 
@@ -162,13 +150,12 @@ export default function ContactsList() {
   // Surface action results as toasts.
   const lastToast = useRef<string | null>(null);
   useEffect(() => {
-    const result =
-      bulkFetcher.data ?? resyncFetcher.data ?? segmentFetcher.data ?? null;
+    const result = bulkFetcher.data ?? resyncFetcher.data ?? null;
     if (result?.toast && result.toast !== lastToast.current) {
       lastToast.current = result.toast;
       shopify.toast.show(result.toast, result.ok ? {} : { isError: true });
     }
-  }, [bulkFetcher.data, resyncFetcher.data, segmentFetcher.data, shopify]);
+  }, [bulkFetcher.data, resyncFetcher.data, shopify]);
 
   const { params } = data;
 
@@ -318,17 +305,15 @@ export default function ContactsList() {
                       icon="email"
                       accessibilityLabel={`Message segment ${seg.name}`}
                     />
-                    <segmentFetcher.Form method="post">
-                      <input type="hidden" name="_action" value="deleteSegment" />
-                      <input type="hidden" name="segmentId" value={seg.id} />
-                      <s-button
-                        type="submit"
-                        variant="tertiary"
-                        tone="critical"
-                        icon="delete"
-                        accessibilityLabel={`Delete segment ${seg.name}`}
-                      />
-                    </segmentFetcher.Form>
+                    <ConfirmAction
+                      id={`confirm-del-seg-${seg.id}`}
+                      triggerIcon="delete"
+                      triggerAccessibilityLabel={`Delete segment ${seg.name}`}
+                      heading="Delete segment?"
+                      message={`The saved segment “${seg.name}” will be removed. Contacts are not affected.`}
+                      confirmLabel="Delete segment"
+                      fields={{ _action: "deleteSegment", segmentId: seg.id }}
+                    />
                   </s-stack>
                 );
               })}

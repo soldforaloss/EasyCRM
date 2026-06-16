@@ -30,7 +30,9 @@ export type IconName =
   | "info"
   | "person"
   | "clock"
-  | "order";
+  | "order"
+  | "delete"
+  | "x";
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle stage                                                     */
