@@ -88,6 +88,23 @@ export async function buildMergeVarsMap(
 }
 
 /* ------------------------------------------------------------------ */
+/* History                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * All message attempts for one contact, oldest-first (chronological thread order). These are the
+ * outbound messages sent from this shop — Brevo BYOK is send-only, so there is no inbound capture.
+ */
+export async function listMessageLogs(shop: string, contactId: string, limit = 200) {
+  const logs = await prisma.messageLog.findMany({
+    where: { shop, contactId },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+  return logs.reverse();
+}
+
+/* ------------------------------------------------------------------ */
 /* Sender preflight                                                    */
 /* ------------------------------------------------------------------ */
 

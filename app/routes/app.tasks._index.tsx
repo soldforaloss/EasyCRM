@@ -1,9 +1,10 @@
+import { useEffect, useRef, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { Form, useActionData, useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
@@ -152,7 +153,33 @@ function TaskGroup({ heading, tasks, tone }: { heading: string; tasks: TaskView[
 export default function TasksPage() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  // createTask submits via this fetcher; toggle/delete still post as navigations (hidden inputs only,
+  // which serialize fine). Both toast sources are watched independently — see contacts-index pattern.
+  const fetcher = useFetcher<{ ok: boolean; toast?: string }>();
+  const [title, setTitle] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [notes, setNotes] = useState("");
+  const busy = fetcher.state !== "idle";
+  const wasBusy = useRef(false);
+
   useActionToast(actionData);
+  useActionToast(fetcher.data);
+
+  // Clear the composer once a create round-trip completes successfully.
+  useEffect(() => {
+    if (wasBusy.current && fetcher.state === "idle" && fetcher.data?.ok) {
+      setTitle("");
+      setDueAt("");
+      setNotes("");
+    }
+    wasBusy.current = fetcher.state !== "idle";
+  }, [fetcher.state, fetcher.data]);
+
+  function addTask() {
+    const value = title.trim();
+    if (!value) return;
+    fetcher.submit({ _action: "createTask", title: value, dueAt, notes }, { method: "post" });
+  }
 
   const empty =
     data.openCount === 0 && data.done.length === 0;
@@ -160,19 +187,34 @@ export default function TasksPage() {
   return (
     <s-page heading="Tasks">
       <s-section heading="New task">
-        <Form method="post">
-          <input type="hidden" name="_action" value="createTask" />
-          <s-stack direction="block" gap="base">
-            <s-stack direction="inline" gap="base" alignItems="end">
-              <s-text-field name="title" label="Task" placeholder="Call back about order…" required />
-              <s-date-field name="dueAt" label="Due date" />
-            </s-stack>
-            <s-text-field name="notes" label="Notes (optional)" />
-            <s-button type="submit" variant="primary">
-              Add task
-            </s-button>
+        <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="base" alignItems="end">
+            <s-text-field
+              label="Task"
+              placeholder="Call back about order…"
+              value={title}
+              onInput={(event) => setTitle((event.target as HTMLInputElement | null)?.value ?? "")}
+            />
+            <s-date-field
+              label="Due date"
+              value={dueAt}
+              onChange={(event) => setDueAt((event.target as HTMLInputElement | null)?.value ?? "")}
+            />
           </s-stack>
-        </Form>
+          <s-text-field
+            label="Notes (optional)"
+            value={notes}
+            onInput={(event) => setNotes((event.target as HTMLInputElement | null)?.value ?? "")}
+          />
+          <s-button
+            variant="primary"
+            onClick={addTask}
+            {...(busy || !title.trim() ? { disabled: true } : {})}
+            {...(busy ? { loading: true } : {})}
+          >
+            Add task
+          </s-button>
+        </s-stack>
       </s-section>
 
       {empty && (

@@ -5,7 +5,6 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import {
-  Form,
   useActionData,
   useFetcher,
   useLoaderData,
@@ -22,13 +21,15 @@ import {
 import { addTagToContact, removeTagFromContact } from "../lib/crm/tags.server";
 import { createTask, listTasks, setTaskStatus } from "../lib/crm/tasks.server";
 import { fetchCustomerDetail } from "../lib/shopify/customers.server";
-import { buildMergeVarsMap, sendToContact } from "../lib/crm/messaging.server";
+import {
+  buildMergeVarsMap,
+  listMessageLogs,
+  sendToContact,
+} from "../lib/crm/messaging.server";
 import { listTemplates } from "../lib/crm/templates.server";
 import { getBrevoStatus } from "../lib/crm/settings.server";
 import {
   ACTIVITY_TYPE_META,
-  LIFECYCLE_STAGES,
-  LIFECYCLE_STAGE_META,
   isActivityType,
   isChannel,
   type BadgeTone,
@@ -44,7 +45,11 @@ import {
 import { computeInsights } from "../lib/crm/insights";
 import { StageBadge, TaskStatusBadge } from "../components/badges";
 import { ComposeMessage } from "../components/compose";
-import { ConfirmAction } from "../components/confirm";
+import { NotesPanel } from "../components/notes-panel";
+import { TasksPanel } from "../components/tasks-panel";
+import { TagEditor } from "../components/tag-editor";
+import { StageSelector } from "../components/stage-selector";
+import { SmsThread, EmailThread } from "../components/message-thread";
 import { useActionToast } from "../lib/use-action-toast";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 
@@ -63,14 +68,16 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     liveError = error instanceof Error ? error.message : "Could not load live customer data.";
   }
 
-  const [notes, activities, tasks, templates, brevoStatus, varsMap] = await Promise.all([
-    listNotes(shop, contact.id),
-    listActivities(shop, contact.id, 100),
-    listTasks(shop, { contactId: contact.id }),
-    listTemplates(shop),
-    getBrevoStatus(shop),
-    buildMergeVarsMap(shop, [contact]),
-  ]);
+  const [notes, activities, tasks, templates, brevoStatus, varsMap, messages] =
+    await Promise.all([
+      listNotes(shop, contact.id),
+      listActivities(shop, contact.id, 100),
+      listTasks(shop, { contactId: contact.id }),
+      listTemplates(shop),
+      getBrevoStatus(shop),
+      buildMergeVarsMap(shop, [contact]),
+      listMessageLogs(shop, contact.id),
+    ]);
 
   const numericId = contact.shopifyCustomerId.split("/").pop();
 
@@ -116,6 +123,15 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       title: t.title,
       status: t.status,
       dueAt: t.dueAt,
+    })),
+    messages: messages.map((m) => ({
+      id: m.id,
+      channel: m.channel,
+      subject: m.subject,
+      bodySnapshot: m.bodySnapshot,
+      status: m.status,
+      error: m.error,
+      createdAt: m.createdAt,
     })),
     templates: templates.map((t) => ({
       id: t.id,
@@ -233,7 +249,14 @@ function describeTimeline(item: {
   }
 }
 
-const TABS = ["Summary", "Orders", "Activity", "Notes & Tasks", "Details"] as const;
+const TABS = [
+  "Summary",
+  "Orders",
+  "Messages",
+  "Activity",
+  "Notes & Tasks",
+  "Details",
+] as const;
 type Tab = (typeof TABS)[number];
 
 const ACTIVITY_FILTERS: ReadonlyArray<{
@@ -252,7 +275,7 @@ const ACTIVITY_FILTERS: ReadonlyArray<{
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
-      <s-stack direction="block" gap="small-500">
+      <s-stack direction="block" gap="small-500" alignItems="center">
         <s-text color="subdued">{label}</s-text>
         <s-heading>{value}</s-heading>
         {sub ? <s-text color="subdued">{sub}</s-text> : null}
@@ -320,6 +343,8 @@ export default function ContactDetail() {
   const recentOrders = allOrders.slice(0, 3);
   const recentActivity = data.timeline.slice(0, 5);
   const openTasks = data.tasks.filter((t) => t.status !== "DONE");
+  const emailMessages = data.messages.filter((m) => m.channel === "EMAIL");
+  const smsMessages = data.messages.filter((m) => m.channel === "SMS");
 
   return (
     <s-page heading={contact.name}>
@@ -338,17 +363,17 @@ export default function ContactDetail() {
 
       {/* Identity header ------------------------------------------------- */}
       <s-section>
-        <s-stack direction="block" gap="base">
-          <s-stack direction="inline" gap="base" alignItems="center">
+        <s-stack direction="block" gap="base" alignItems="center">
+          <s-stack direction="inline" gap="base" alignItems="center" justifyContent="center">
             <s-avatar initials={initials(contact.firstName, contact.lastName)} size="base" alt={contact.name} />
             <s-stack direction="block" gap="small-500">
-              <s-stack direction="inline" gap="small-200" alignItems="center">
+              <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="center">
                 <s-heading>{contact.name}</s-heading>
                 <StageBadge stage={contact.stage} />
                 {live?.verifiedEmail ? <s-badge tone="success">Verified email</s-badge> : null}
                 {insights?.atRisk ? <s-badge tone="critical">At risk</s-badge> : null}
               </s-stack>
-              <s-stack direction="inline" gap="base">
+              <s-stack direction="inline" gap="base" justifyContent="center">
                 {contact.email ? (
                   <s-link href={`mailto:${contact.email}`}>{contact.email}</s-link>
                 ) : (
@@ -360,7 +385,7 @@ export default function ContactDetail() {
             </s-stack>
           </s-stack>
           {contact.tags.length > 0 && (
-            <s-stack direction="inline" gap="small-200">
+            <s-stack direction="inline" gap="small-200" justifyContent="center">
               {contact.tags.map((t) => (
                 <s-badge key={t.id} tone="neutral">
                   {t.name}
@@ -373,7 +398,7 @@ export default function ContactDetail() {
 
       {/* KPI bar --------------------------------------------------------- */}
       <s-section>
-        <s-grid gridTemplateColumns="1fr 1fr 1fr 1fr" gap="base">
+        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(160px, 1fr))" gap="base">
           <Stat label="Lifetime value" value={liveSpent} />
           <Stat label="Orders" value={String(liveOrderCount)} />
           <Stat label="Avg order value" value={insights ? formatMoney(insights.aov, currency) : "—"} />
@@ -402,7 +427,7 @@ export default function ContactDetail() {
 
       {/* Tabs ------------------------------------------------------------ */}
       <s-section>
-        <s-stack direction="inline" gap="small-200">
+        <s-stack direction="inline" gap="small-200" justifyContent="center">
           {TABS.map((t) => (
             <s-button
               key={t}
@@ -603,6 +628,49 @@ export default function ContactDetail() {
         </s-section>
       )}
 
+      {/* MESSAGES -------------------------------------------------------- */}
+      {tab === "Messages" && (
+        <>
+          <s-section>
+            <s-stack direction="block" alignItems="center">
+              <s-text color="subdued">
+                Messages you&apos;ve sent to this contact. Brevo is send-only, so customer replies
+                aren&apos;t captured here.
+              </s-text>
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Text messages">
+            <SmsThread messages={smsMessages} />
+          </s-section>
+
+          <s-section heading="Emails">
+            <EmailThread messages={emailMessages} />
+          </s-section>
+
+          <s-section heading="Send a message">
+            {data.brevoConnected ? (
+              <ComposeMessage
+                heading="Send a message"
+                canEmail={Boolean(contact.email)}
+                canSms={Boolean(contact.phone)}
+                previewVars={data.previewVars}
+                templates={data.templates}
+                actionValue="sendMessage"
+                submitLabel="Send message"
+              />
+            ) : (
+              <s-stack direction="block" gap="base" alignItems="center">
+                <s-paragraph color="subdued">
+                  Connect Brevo in Settings to send email and SMS to this contact.
+                </s-paragraph>
+                <s-button href="/app/settings">Go to Settings</s-button>
+              </s-stack>
+            )}
+          </s-section>
+        </>
+      )}
+
       {/* ACTIVITY -------------------------------------------------------- */}
       {tab === "Activity" && (
         <s-section heading="Activity timeline">
@@ -650,97 +718,11 @@ export default function ContactDetail() {
       {tab === "Notes & Tasks" && (
         <>
           <s-section heading="Notes">
-            <s-stack direction="block" gap="base">
-              <Form method="post">
-                <input type="hidden" name="_action" value="addNote" />
-                <s-stack direction="block" gap="small-200">
-                  <s-text-area name="body" label="Add a note" rows={3} required />
-                  <s-button type="submit" variant="primary">
-                    Add note
-                  </s-button>
-                </s-stack>
-              </Form>
-
-              {data.notes.map((note) => (
-                <s-box key={note.id} padding="base" borderWidth="base" borderRadius="base">
-                  <s-stack direction="block" gap="small-200">
-                    <s-text color="subdued">{formatDateTime(note.createdAt)}</s-text>
-                    <Form method="post">
-                      <input type="hidden" name="_action" value="editNote" />
-                      <input type="hidden" name="noteId" value={note.id} />
-                      <s-stack direction="block" gap="small-200">
-                        <s-text-area name="body" label="Note" value={note.body} rows={3} />
-                        <s-stack direction="inline" gap="base">
-                          <s-button type="submit" variant="secondary">
-                            Save
-                          </s-button>
-                        </s-stack>
-                      </s-stack>
-                    </Form>
-                    <ConfirmAction
-                      id={`confirm-del-note-${note.id}`}
-                      triggerLabel="Delete note"
-                      heading="Delete note?"
-                      message="This note will be permanently removed."
-                      confirmLabel="Delete note"
-                      fields={{ _action: "deleteNote", noteId: note.id }}
-                    />
-                  </s-stack>
-                </s-box>
-              ))}
-            </s-stack>
+            <NotesPanel notes={data.notes} />
           </s-section>
 
           <s-section heading="Tasks">
-            <s-stack direction="block" gap="base">
-              <Form method="post">
-                <input type="hidden" name="_action" value="createTask" />
-                <s-stack direction="inline" gap="base" alignItems="end">
-                  <s-text-field name="title" label="New task" placeholder="Follow up…" required />
-                  <s-date-field name="dueAt" label="Due date" />
-                  <s-button type="submit" variant="primary">
-                    Add task
-                  </s-button>
-                </s-stack>
-              </Form>
-
-              {data.tasks.length === 0 ? (
-                <s-paragraph color="subdued">No tasks for this contact.</s-paragraph>
-              ) : (
-                <s-stack direction="block" gap="small-200">
-                  {data.tasks.map((task) => (
-                    <s-box
-                      key={task.id}
-                      padding="small-200"
-                      borderRadius="base"
-                      background="subdued"
-                    >
-                      <s-stack direction="inline" gap="base" alignItems="center">
-                        <TaskStatusBadge status={task.status} />
-                        <s-stack direction="block" gap="small-500">
-                          <s-text type="strong">{task.title}</s-text>
-                          {task.dueAt && (
-                            <s-text color="subdued">Due {formatDate(task.dueAt)}</s-text>
-                          )}
-                        </s-stack>
-                        <Form method="post">
-                          <input type="hidden" name="_action" value="toggleTask" />
-                          <input type="hidden" name="taskId" value={task.id} />
-                          <input
-                            type="hidden"
-                            name="status"
-                            value={task.status === "DONE" ? "OPEN" : "DONE"}
-                          />
-                          <s-button type="submit" variant="tertiary">
-                            {task.status === "DONE" ? "Reopen" : "Mark done"}
-                          </s-button>
-                        </Form>
-                      </s-stack>
-                    </s-box>
-                  ))}
-                </s-stack>
-              )}
-            </s-stack>
+            <TasksPanel tasks={data.tasks} />
           </s-section>
         </>
       )}
@@ -816,47 +798,12 @@ export default function ContactDetail() {
       <s-section slot="aside" heading="Lifecycle stage">
         <s-stack direction="block" gap="small-200">
           <StageBadge stage={contact.stage} />
-          <Form method="post">
-            <input type="hidden" name="_action" value="setStage" />
-            <s-stack direction="inline" gap="base" alignItems="end">
-              <s-select name="stage" label="Change stage" value={contact.stage}>
-                {LIFECYCLE_STAGES.map((stage) => (
-                  <s-option key={stage} value={stage}>
-                    {LIFECYCLE_STAGE_META[stage].label}
-                  </s-option>
-                ))}
-              </s-select>
-              <s-button type="submit">Update</s-button>
-            </s-stack>
-          </Form>
+          <StageSelector value={contact.stage} />
         </s-stack>
       </s-section>
 
       <s-section slot="aside" heading="Tags">
-        <s-stack direction="block" gap="small-200">
-          {contact.tags.length === 0 ? (
-            <s-text color="subdued">No tags yet.</s-text>
-          ) : (
-            <s-stack direction="inline" gap="small-200">
-              {contact.tags.map((tag) => (
-                <Form key={tag.id} method="post">
-                  <input type="hidden" name="_action" value="removeTag" />
-                  <input type="hidden" name="tagId" value={tag.id} />
-                  <s-button type="submit" variant="tertiary" icon="x">
-                    {tag.name}
-                  </s-button>
-                </Form>
-              ))}
-            </s-stack>
-          )}
-          <Form method="post">
-            <input type="hidden" name="_action" value="addTag" />
-            <s-stack direction="inline" gap="base" alignItems="end">
-              <s-text-field name="tagName" label="Add tag" placeholder="e.g. VIP" />
-              <s-button type="submit">Add</s-button>
-            </s-stack>
-          </Form>
-        </s-stack>
+        <TagEditor tags={contact.tags} />
       </s-section>
     </s-page>
   );
