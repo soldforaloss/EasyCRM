@@ -127,6 +127,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     messages: messages.map((m) => ({
       id: m.id,
       channel: m.channel,
+      direction: m.direction,
       subject: m.subject,
       bodySnapshot: m.bodySnapshot,
       status: m.status,
@@ -242,6 +243,9 @@ function describeTimeline(item: {
     case "EMAIL_SENT":
     case "SMS_SENT":
       return String(p.subject ?? p.preview ?? "Message sent");
+    case "EMAIL_RECEIVED":
+    case "SMS_RECEIVED":
+      return String(p.subject ?? p.preview ?? "Message received");
     case "TASK":
       return `${p.title ?? "Task"} (${p.action ?? "updated"})`;
     default:
@@ -267,7 +271,11 @@ const ACTIVITY_FILTERS: ReadonlyArray<{
   { id: "ALL", label: "All", types: null },
   { id: "NOTE", label: "Notes", types: ["NOTE"] },
   { id: "ORDER", label: "Orders", types: ["ORDER_PLACED"] },
-  { id: "MESSAGE", label: "Messages", types: ["EMAIL_SENT", "SMS_SENT"] },
+  {
+    id: "MESSAGE",
+    label: "Messages",
+    types: ["EMAIL_SENT", "SMS_SENT", "EMAIL_RECEIVED", "SMS_RECEIVED"],
+  },
   { id: "TASK", label: "Tasks", types: ["TASK"] },
   { id: "STAGE", label: "Stage", types: ["STAGE_CHANGED"] },
 ];
@@ -634,8 +642,8 @@ export default function ContactDetail() {
           <s-section>
             <s-stack direction="block" alignItems="center">
               <s-text color="subdued">
-                Messages you&apos;ve sent to this contact. Brevo is send-only, so customer replies
-                aren&apos;t captured here.
+                Conversation with this contact — your messages on the right, their replies on the
+                left. Set up reply capture in Settings → Receiving messages.
               </s-text>
             </s-stack>
           </s-section>

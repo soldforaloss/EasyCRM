@@ -3,7 +3,7 @@
  * Lists are served from the local mirror for speed (see DECISIONS.md §3). SERVER ONLY.
  */
 
-import type { Prisma } from "@prisma/client";
+import type { Contact, Prisma } from "@prisma/client";
 import prisma from "../../db.server";
 import {
   DEFAULT_LIFECYCLE_STAGE,
@@ -142,6 +142,39 @@ export async function getContactByShopifyId(
   return prisma.contact.findFirst({
     where: { shop, shopifyCustomerId },
     include: { tags: { include: { tag: true } } },
+  });
+}
+
+/**
+ * Find a contact by email within a shop (case-insensitive on SQLite; for Postgres add
+ * `mode: "insensitive"` per DECISIONS.md §2). Uses the `(shop, email)` index. `findFirst` because
+ * the index is non-unique — pick the most recently updated on a collision. Used for inbound matching.
+ */
+export async function findContactByEmail(
+  shop: string,
+  email: string,
+): Promise<Contact | null> {
+  const value = email.trim();
+  if (!value) return null;
+  return prisma.contact.findFirst({
+    where: { shop, email: value },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+/**
+ * Find a contact by phone within a shop. Best-effort: matches against the stored value (callers
+ * pass a normalized E.164 string). Uses the `(shop, phone)` index. Used for inbound SMS matching.
+ */
+export async function findContactByPhone(
+  shop: string,
+  phone: string,
+): Promise<Contact | null> {
+  const value = phone.trim();
+  if (!value) return null;
+  return prisma.contact.findFirst({
+    where: { shop, phone: value },
+    orderBy: { updatedAt: "desc" },
   });
 }
 

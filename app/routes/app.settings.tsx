@@ -3,13 +3,18 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import { useState } from "react";
+import { Form, useActionData, useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
   getBrevoStatus,
+  getInboundConfig,
+  getOrCreateInboundToken,
   removeBrevoKey,
+  rotateInboundToken,
   saveBrevoKey,
+  setInboundSecret,
   updateSenderSettings,
 } from "../lib/crm/settings.server";
 import { sendTestMessage } from "../lib/crm/messaging.server";
@@ -19,7 +24,17 @@ import { useActionToast } from "../lib/use-action-toast";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  return { status: await getBrevoStatus(session.shop) };
+  const [status, inbound] = await Promise.all([
+    getBrevoStatus(session.shop),
+    getInboundConfig(session.shop),
+  ]);
+  // The webhook URL the merchant pastes into Brevo. Prefer the configured app URL; fall back to the
+  // request origin (the embedded app / tunnel host).
+  const origin = process.env.SHOPIFY_APP_URL ?? new URL(request.url).origin;
+  const inboundWebhookUrl = inbound.token
+    ? `${origin.replace(/\/$/, "")}/webhooks/brevo/${inbound.token}`
+    : null;
+  return { status, inbound: { secretSet: inbound.secretSet, webhookUrl: inboundWebhookUrl } };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -57,6 +72,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           ? { ok: true, toast: "Test message sent." }
           : { ok: false, toast: result.error ?? "Test send failed." };
       }
+      case "generateInboundUrl":
+        await getOrCreateInboundToken(shop);
+        return { ok: true, toast: "Inbound webhook URL generated." };
+      case "rotateInboundToken":
+        await rotateInboundToken(shop);
+        return { ok: true, toast: "New URL generated — update it in Brevo (the old one stops working)." };
+      case "saveInboundSecret": {
+        const secret = String(form.get("inboundSecret") ?? "").trim();
+        await setInboundSecret(shop, secret || null);
+        return { ok: true, toast: secret ? "Inbound secret saved." : "Inbound secret cleared." };
+      }
       default:
         return { ok: false, toast: "Unknown action." };
     }
@@ -66,9 +92,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function SettingsPage() {
-  const { status } = useLoaderData<typeof loader>();
+  const { status, inbound } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  // The inbound secret carries a Polaris field value, so it submits via a fetcher with controlled
+  // state (native <Form> submits don't reliably capture web-component values — see the gotchas).
+  const secretFetcher = useFetcher<{ ok: boolean; toast?: string }>();
+  const [inboundSecret, setInboundSecret] = useState("");
   useActionToast(actionData);
+  useActionToast(secretFetcher.data);
+  const savingSecret = secretFetcher.state !== "idle";
 
   return (
     <s-page heading="Settings">
@@ -197,6 +229,91 @@ export default function SettingsPage() {
         ) : (
           <s-paragraph color="subdued">Connect Brevo above to send a test message.</s-paragraph>
         )}
+      </s-section>
+
+      {/* Receiving messages (inbound) ----------------------------------- */}
+      <s-section heading="Receiving messages">
+        <s-stack direction="block" gap="base">
+          <s-paragraph color="subdued">
+            Capture customer email and SMS replies via Brevo Conversations webhooks so they appear in
+            each contact&apos;s Messages thread. This can&apos;t be set up automatically — generate the
+            URL below and add it in Brevo.
+          </s-paragraph>
+
+          {inbound.webhookUrl ? (
+            <>
+              <s-stack direction="block" gap="small-200">
+                <s-text type="strong">Your webhook URL</s-text>
+                <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
+                  <s-text>{inbound.webhookUrl}</s-text>
+                </s-box>
+                <s-stack direction="inline" gap="base">
+                  <s-button onClick={() => navigator.clipboard?.writeText(inbound.webhookUrl!)}>
+                    Copy URL
+                  </s-button>
+                  <ConfirmAction
+                    id="confirm-rotate-inbound"
+                    triggerLabel="Rotate URL"
+                    heading="Rotate webhook URL?"
+                    message="A new URL is generated and the current one stops working. You'll need to update it in Brevo."
+                    confirmLabel="Rotate URL"
+                    fields={{ _action: "rotateInboundToken" }}
+                  />
+                </s-stack>
+              </s-stack>
+
+              <s-stack direction="block" gap="small-200">
+                <s-text-field
+                  label="Optional basic-auth secret"
+                  value={inboundSecret}
+                  placeholder={inbound.secretSet ? "•••••••• (a secret is set)" : "Leave blank for none"}
+                  onInput={(event) =>
+                    setInboundSecret((event.target as HTMLInputElement | null)?.value ?? "")
+                  }
+                />
+                <s-text color="subdued">
+                  If set, Brevo must send it as a Bearer token or basic-auth password on the webhook.
+                </s-text>
+                <s-button
+                  variant="secondary"
+                  onClick={() =>
+                    secretFetcher.submit(
+                      { _action: "saveInboundSecret", inboundSecret },
+                      { method: "post" },
+                    )
+                  }
+                  {...(savingSecret ? { loading: true, disabled: true } : {})}
+                >
+                  Save secret
+                </s-button>
+              </s-stack>
+
+              <s-banner tone="info" heading="Set it up in Brevo">
+                <s-ordered-list>
+                  <s-list-item>Enable Brevo Conversations on your account.</s-list-item>
+                  <s-list-item>
+                    For two-way SMS, provision a dedicated number (US/CA/FR; France can&apos;t receive
+                    replies) and route SMS into Conversations.
+                  </s-list-item>
+                  <s-list-item>
+                    In Brevo → Conversations → Settings → Integrations → Webhooks, add the URL above
+                    (and the secret, if you set one).
+                  </s-list-item>
+                </s-ordered-list>
+                <s-paragraph>
+                  Only email and SMS are threaded into contacts; chat and social sources are ignored.
+                </s-paragraph>
+              </s-banner>
+            </>
+          ) : (
+            <Form method="post">
+              <input type="hidden" name="_action" value="generateInboundUrl" />
+              <s-button type="submit" variant="primary">
+                Generate webhook URL
+              </s-button>
+            </Form>
+          )}
+        </s-stack>
       </s-section>
     </s-page>
   );

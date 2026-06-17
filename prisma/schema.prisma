@@ -87,6 +87,7 @@ model Contact {
   @@index([shop])
   @@index([shop, lifecycleStage])
   @@index([shop, email])
+  @@index([shop, phone])
   @@index([shop, amountSpent])
   @@index([shop, updatedAt])
 }
@@ -197,11 +198,15 @@ model MessageLog {
   shop              String
   contactId         String
   channel           String // EMAIL | SMS
+  direction         String   @default("OUTBOUND") // OUTBOUND | INBOUND
   templateId        String?
   subject           String?
   bodySnapshot      String
-  status            String   @default("QUEUED") // QUEUED | SENT | FAILED
-  providerMessageId String?
+  status            String   @default("QUEUED") // QUEUED | SENT | FAILED (outbound only; ignored for inbound)
+  providerMessageId String? // Brevo id for OUR outbound send
+  // Brevo Conversations per-message id for INBOUND dedup. Null for outbound rows; engines treat
+  // NULLs as distinct in unique indexes, so many outbound NULLs coexist (DECISIONS.md §2).
+  providerEventId   String?
   error             String?
   sentByStaffId     String?
   createdAt         DateTime @default(now())
@@ -209,6 +214,7 @@ model MessageLog {
   contact  Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
   template MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
 
+  @@unique([shop, providerEventId])
   @@index([shop, contactId])
   @@index([shop, createdAt])
 }
@@ -238,6 +244,12 @@ model ShopSettings {
   brevoSenderEmail     String?
   brevoSenderName      String?
   brevoSmsSender       String?
+
+  // Inbound (two-way) messaging via Brevo Conversations webhooks. The token is the secret in the
+  // per-shop webhook URL (capability URL); the optional secret is an extra basic-auth check,
+  // encrypted at rest like the API key. See DECISIONS.md §5 + §9.
+  brevoInboundToken  String? @unique
+  brevoInboundSecret String?
 
   // Optional override of lifecycle stages (JSON-as-String array). Null => defaults.
   lifecycleStages String?

@@ -78,6 +78,8 @@ export const ACTIVITY_TYPES = [
   "NOTE",
   "EMAIL_SENT",
   "SMS_SENT",
+  "EMAIL_RECEIVED",
+  "SMS_RECEIVED",
   "ORDER_PLACED",
   "STAGE_CHANGED",
   "TASK",
@@ -96,6 +98,8 @@ export const ACTIVITY_TYPE_META: Record<
   NOTE: { label: "Note", icon: "note" },
   EMAIL_SENT: { label: "Email sent", icon: "email" },
   SMS_SENT: { label: "SMS sent", icon: "chat" },
+  EMAIL_RECEIVED: { label: "Email received", icon: "email" },
+  SMS_RECEIVED: { label: "SMS received", icon: "chat" },
   ORDER_PLACED: { label: "Order placed", icon: "cart" },
   STAGE_CHANGED: { label: "Stage changed", icon: "flag" },
   TASK: { label: "Task", icon: "calendar" },
@@ -133,6 +137,19 @@ export const CHANNEL_META: Record<Channel, { label: string; icon: IconName }> = 
   EMAIL: { label: "Email", icon: "email" },
   SMS: { label: "SMS", icon: "chat" },
 };
+
+/* ------------------------------------------------------------------ */
+/* Message direction (outbound = we sent it; inbound = customer reply) */
+/* ------------------------------------------------------------------ */
+
+export const MESSAGE_DIRECTIONS = ["OUTBOUND", "INBOUND"] as const;
+export type MessageDirection = (typeof MESSAGE_DIRECTIONS)[number];
+
+export function isMessageDirection(v: unknown): v is MessageDirection {
+  return (
+    typeof v === "string" && (MESSAGE_DIRECTIONS as readonly string[]).includes(v)
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Message log status                                                  */

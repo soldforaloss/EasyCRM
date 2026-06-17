@@ -142,3 +142,30 @@ not available in this build sandbox. Per-phase acceptance is therefore verified 
 strongest local gates available: `prisma migrate` + `prisma generate`, `npm run typecheck`
 (`react-router typegen && tsc --noEmit`), `npm run build`, ESLint, and `vitest`. Live
 embedded-install verification is left for the user's Partner account + dev store.
+
+## 9. Inbound (two-way) messaging — Brevo Conversations webhooks
+
+Receiving customer email/SMS replies uses **Brevo Conversations webhooks**
+(`conversationStarted`/`conversationFragment`/`conversationTranscript`), one endpoint that captures
+inbound across channels (email + two-way SMS via a Brevo dedicated number, plus chat/social we
+ignore). Chosen over **Inbound Parsing** (`type:inbound`, REST-creatable but email-only + needs MX
+delegation) because it covers SMS too.
+
+- **Not auto-registerable.** The REST `/v3/webhooks` API only creates `transactional`/`marketing`/
+  `inbound` — Conversations webhooks must be added **manually** in Brevo (Conversations → Settings →
+  Integrations → Webhooks). So the app generates a per-shop URL + shows setup steps in Settings.
+- **Public endpoint** `app/routes/webhooks.brevo.$token.tsx` — NOT `authenticate.webhook` (auth is
+  per-route). Security: a high-entropy `brevoInboundToken` in the URL path resolves the shop
+  (`findShopByInboundToken`), plus an optional `brevoInboundSecret` (encrypted) checked against the
+  request's Bearer/basic-auth via `safeEqual`. Body size-capped; always returns 200 on authenticated
+  requests (no Brevo retry storms); the shop is derived **only** from the token, never the body.
+- **Ingestion** (`app/lib/crm/inbound.server.ts`): keep only `type:"visitor"` messages (our own
+  outbound shows as `agent` and is ignored → no duplicate-of-outbound). Channel from `visitor.source`
+  (permissive map; falls back to inferring from sender shape). Match a `Contact` by email/phone within
+  the shop; store an **INBOUND `MessageLog`** with `direction` + `providerEventId` (unique
+  `(shop, providerEventId)` → P2002 no-op on redelivery, mirroring `ProcessedOrder`); log an
+  `EMAIL_RECEIVED`/`SMS_RECEIVED` activity. `status` is meaningless for inbound (UI gates the badge on
+  `direction`).
+- **Unmatched senders are skipped + logged** — `MessageLog.contactId` is required and the mirror
+  assumes every Contact maps to a Shopify customer, so auto-creating "shadow" contacts is out of scope
+  (would need a nullable `shopifyCustomerId`). A future "unmatched inbox" could revisit.
