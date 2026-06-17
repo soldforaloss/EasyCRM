@@ -6,6 +6,41 @@ Rather than cloning this repo, follow the [Quick Start steps](https://github.com
 
 Visit the [`shopify.dev` documentation](https://shopify.dev/docs/api/shopify-app-react-router) for more details on the React Router app package.
 
+## Easy CRM (this app)
+
+Easy CRM is an embedded Shopify CRM that mirrors customers locally for fast list/search,
+shows live order history, and sends BYOK email + SMS via **Brevo**. See
+[`DECISIONS.md`](./DECISIONS.md) for architecture decisions and the build prompt for full scope.
+
+### Required environment variables
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` | yes | Provided by the Shopify CLI (`shopify app dev`) / your host. |
+| `SHOPIFY_APP_URL` | yes | App URL / tunnel URL (set by the CLI in dev). |
+| `SCOPES` | optional | Falls back to `shopify.app.toml` (`read_customers,read_orders`). |
+| `DATABASE_URL` | yes | Prisma datasource. Dev defaults to `file:dev.sqlite`; set a Postgres/MySQL URL in prod. |
+| `ENCRYPTION_KEY` | yes | 32-byte secret (64 hex chars or 32-byte base64) used to AES-256-GCM encrypt the Brevo API key at rest. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
+
+Copy `.env.example` to `.env` for local development. **Never commit real secrets.**
+
+### Run, test, migrate
+
+```shell
+npm run dev          # shopify app dev (embedded)
+npm run setup        # prisma generate && prisma migrate deploy (prod)
+npx prisma migrate dev   # create/apply a migration in dev
+npm run typecheck    # react-router typegen && tsc --noEmit
+npm run test         # vitest unit tests (crypto, phone, merge, Brevo client, ...)
+npm run build        # production build
+```
+
+### Enabling billing later
+
+Billing ships as an isolated stub in [`app/lib/billing.server.ts`](./app/lib/billing.server.ts).
+Add a `billing` config to `shopifyApp(...)`, replace the body of `requireActivePlan`, and call
+it at the top of the loaders you want to gate. No call sites change. See `DECISIONS.md` §6.
+
 ## Upgrading from Remix
 
 If you have an existing Remix app that you want to upgrade to React Router, please follow the [upgrade guide](https://github.com/Shopify/shopify-app-template-react-router/wiki/Upgrading-from-Remix). Otherwise, please follow the quick start guide below.
