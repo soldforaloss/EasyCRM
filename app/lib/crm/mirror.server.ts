@@ -8,6 +8,7 @@ import prisma from "../../db.server";
 import { parseMoney } from "../format";
 import { logActivity } from "./activity.server";
 import {
+  fetchCustomerSyncFields,
   iterateCustomers,
   type AdminGraphqlClient,
 } from "../shopify/customers.server";
@@ -165,6 +166,60 @@ export async function recordOrderFromWebhook(
       currency: payload.currency ?? null,
     },
   });
+}
+
+/**
+ * Live per-customer refresh: pull authoritative spend / order count / last-order date from the
+ * GraphQL Admin API and write them to the mirror (absolute, the source of truth). Called by the
+ * customers/* and orders/* webhook handlers so the list stays correct after refunds, edits and
+ * cancellations (Shopify no longer ships these fields in the webhook payload). Never throws — a
+ * refresh failure (e.g. transient rate-limit) leaves the optimistic values in place and is
+ * reconciled by the next webhook or backfill.
+ */
+export async function refreshContactFromShopify(
+  admin: AdminGraphqlClient,
+  shop: string,
+  customerGid: string,
+): Promise<void> {
+  let fields;
+  try {
+    fields = await fetchCustomerSyncFields(admin, customerGid);
+  } catch {
+    return;
+  }
+  if (!fields) return;
+  await prisma.contact.updateMany({
+    where: { shop, shopifyCustomerId: customerGid },
+    data: {
+      amountSpent: fields.amountSpent,
+      ordersCount: fields.numberOfOrders,
+      ...(fields.currencyCode ? { currencyCode: fields.currencyCode } : {}),
+      ...(fields.lastOrderAt ? { lastOrderAt: new Date(fields.lastOrderAt) } : {}),
+      lastSyncedAt: new Date(),
+    },
+  });
+}
+
+/** customers/create|update: mirror identity fields, then live-refresh authoritative spend/orders. */
+export async function upsertAndRefreshContact(
+  admin: AdminGraphqlClient,
+  shop: string,
+  payload: CustomerWebhookPayload,
+): Promise<void> {
+  await upsertContactFromWebhook(shop, payload);
+  const gid = customerGid(payload);
+  if (gid) await refreshContactFromShopify(admin, shop, gid);
+}
+
+/** orders/create|paid: append the timeline event, then live-refresh authoritative spend/orders. */
+export async function recordOrderAndRefresh(
+  admin: AdminGraphqlClient,
+  shop: string,
+  payload: OrderWebhookPayload,
+): Promise<void> {
+  await recordOrderFromWebhook(shop, payload);
+  const gid = payload.customer ? customerGid(payload.customer) : null;
+  if (gid) await refreshContactFromShopify(admin, shop, gid);
 }
 
 export interface BackfillResult {

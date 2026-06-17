@@ -71,6 +71,18 @@ export function formatRelativeDay(value: Date | string | null | undefined): stri
   return formatDate(d);
 }
 
+/** Human label for a day count, e.g. "today", "5 days", "3 mo", "1 yr 2 mo". */
+export function formatDurationDays(days: number | null | undefined): string {
+  if (days === null || days === undefined || !Number.isFinite(days)) return "—";
+  if (days <= 0) return "today";
+  if (days < 31) return `${days} day${days === 1 ? "" : "s"}`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} mo`;
+  const years = Math.floor(months / 12);
+  const remMonths = months % 12;
+  return remMonths > 0 ? `${years} yr ${remMonths} mo` : `${years} yr`;
+}
+
 /** Display name from optional first/last with a fallback. */
 export function displayName(
   firstName?: string | null,

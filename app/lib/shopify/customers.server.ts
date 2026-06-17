@@ -97,6 +97,11 @@ export async function* iterateCustomers(
 /* Detail page: live profile + order history                          */
 /* ------------------------------------------------------------------ */
 
+export interface LiveLineItem {
+  title: string;
+  quantity: number;
+}
+
 export interface LiveCustomerOrder {
   id: string;
   name: string;
@@ -104,6 +109,7 @@ export interface LiveCustomerOrder {
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string | null;
   totalPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
+  lineItems: LiveLineItem[];
 }
 
 export interface LiveCustomer {
@@ -114,6 +120,7 @@ export interface LiveCustomer {
   email: string | null;
   phone: string | null;
   note: string | null;
+  verifiedEmail: boolean | null;
   createdAt: string;
   updatedAt: string;
   numberOfOrders: string;
@@ -121,6 +128,11 @@ export interface LiveCustomer {
   emailMarketingState: string | null;
   smsMarketingState: string | null;
   defaultAddress: LiveAddress | null;
+  tags: string[];
+  /** ISO date of the customer's earliest order (for tenure / order frequency). */
+  firstOrderAt: string | null;
+  /** ISO date of the customer's most recent order. */
+  lastOrderAt: string | null;
   orders: {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
     nodes: LiveCustomerOrder[];
@@ -139,10 +151,32 @@ export interface LiveAddress {
 }
 
 interface CustomerDetailData {
-  customer: (Omit<LiveCustomer, "emailMarketingState" | "smsMarketingState"> & {
-    emailMarketingConsent: { marketingState: string } | null;
-    smsMarketingConsent: { marketingState: string } | null;
-  }) | null;
+  customer:
+    | {
+        id: string;
+        displayName: string | null;
+        firstName: string | null;
+        lastName: string | null;
+        note: string | null;
+        verifiedEmail: boolean | null;
+        createdAt: string;
+        updatedAt: string;
+        numberOfOrders: string;
+        amountSpent: { amount: string; currencyCode: string } | null;
+        defaultEmailAddress: { emailAddress: string | null; marketingState: string | null } | null;
+        defaultPhoneNumber: { phoneNumber: string | null; marketingState: string | null } | null;
+        defaultAddress: LiveAddress | null;
+        tags: string[];
+        firstOrder: { nodes: Array<{ createdAt: string }> };
+        lastOrder: { createdAt: string } | null;
+        orders: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: Array<Omit<LiveCustomerOrder, "lineItems"> & {
+            lineItems: { nodes: LiveLineItem[] };
+          }>;
+        };
+      }
+    | null;
 }
 
 const CUSTOMER_DETAIL_QUERY = `#graphql
@@ -152,15 +186,15 @@ const CUSTOMER_DETAIL_QUERY = `#graphql
       displayName
       firstName
       lastName
-      email
-      phone
       note
+      verifiedEmail
       createdAt
       updatedAt
       numberOfOrders
       amountSpent { amount currencyCode }
-      emailMarketingConsent { marketingState }
-      smsMarketingConsent { marketingState }
+      defaultEmailAddress { emailAddress marketingState }
+      defaultPhoneNumber { phoneNumber marketingState }
+      tags
       defaultAddress {
         formatted
         address1
@@ -171,6 +205,10 @@ const CUSTOMER_DETAIL_QUERY = `#graphql
         zip
         phone
       }
+      firstOrder: orders(first: 1, sortKey: CREATED_AT) {
+        nodes { createdAt }
+      }
+      lastOrder { createdAt }
       orders(first: $orders, after: $ordersAfter, sortKey: CREATED_AT, reverse: true) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -180,6 +218,7 @@ const CUSTOMER_DETAIL_QUERY = `#graphql
           displayFinancialStatus
           displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
+          lineItems(first: 10) { nodes { title quantity } }
         }
       }
     }
@@ -202,17 +241,78 @@ export async function fetchCustomerDetail(
     displayName: c.displayName,
     firstName: c.firstName,
     lastName: c.lastName,
-    email: c.email,
-    phone: c.phone,
+    email: c.defaultEmailAddress?.emailAddress ?? null,
+    phone: c.defaultPhoneNumber?.phoneNumber ?? null,
     note: c.note,
+    verifiedEmail: c.verifiedEmail,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     numberOfOrders: c.numberOfOrders,
     amountSpent: c.amountSpent,
-    emailMarketingState: c.emailMarketingConsent?.marketingState ?? null,
-    smsMarketingState: c.smsMarketingConsent?.marketingState ?? null,
+    emailMarketingState: c.defaultEmailAddress?.marketingState ?? null,
+    smsMarketingState: c.defaultPhoneNumber?.marketingState ?? null,
     defaultAddress: c.defaultAddress,
-    orders: c.orders,
+    tags: c.tags ?? [],
+    firstOrderAt: c.firstOrder?.nodes[0]?.createdAt ?? null,
+    lastOrderAt: c.lastOrder?.createdAt ?? null,
+    orders: {
+      pageInfo: c.orders.pageInfo,
+      nodes: c.orders.nodes.map((o) => ({
+        id: o.id,
+        name: o.name,
+        createdAt: o.createdAt,
+        displayFinancialStatus: o.displayFinancialStatus,
+        displayFulfillmentStatus: o.displayFulfillmentStatus,
+        totalPriceSet: o.totalPriceSet,
+        lineItems: o.lineItems?.nodes ?? [],
+      })),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Lightweight sync fields (live per-customer refresh on webhook)      */
+/* ------------------------------------------------------------------ */
+
+export interface CustomerSyncFields {
+  amountSpent: number;
+  currencyCode: string | null;
+  numberOfOrders: number;
+  lastOrderAt: string | null;
+}
+
+interface CustomerSyncData {
+  customer: {
+    numberOfOrders: string;
+    amountSpent: { amount: string; currencyCode: string } | null;
+    lastOrder: { createdAt: string } | null;
+  } | null;
+}
+
+const CUSTOMER_SYNC_QUERY = `#graphql
+  query CrmCustomerSync($id: ID!) {
+    customer(id: $id) {
+      numberOfOrders
+      amountSpent { amount currencyCode }
+      lastOrder { createdAt }
+    }
+  }`;
+
+/** Fetch authoritative spend/orders/last-order for one customer (used by the webhook refresh). */
+export async function fetchCustomerSyncFields(
+  admin: AdminGraphqlClient,
+  customerGid: string,
+): Promise<CustomerSyncFields | null> {
+  const data = await runQuery<CustomerSyncData>(admin, CUSTOMER_SYNC_QUERY, {
+    id: customerGid,
+  });
+  if (!data.customer) return null;
+  const amount = data.customer.amountSpent?.amount;
+  return {
+    amountSpent: amount ? Number.parseFloat(amount) : 0,
+    currencyCode: data.customer.amountSpent?.currencyCode ?? null,
+    numberOfOrders: Number.parseInt(data.customer.numberOfOrders, 10) || 0,
+    lastOrderAt: data.customer.lastOrder?.createdAt ?? null,
   };
 }
 
@@ -220,9 +320,18 @@ interface CustomerOrdersData {
   customer: {
     orders: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      nodes: LiveCustomerOrder[];
+      nodes: Array<Omit<LiveCustomerOrder, "lineItems"> & {
+        lineItems: { nodes: LiveLineItem[] };
+      }>;
     };
   } | null;
+}
+
+export interface OrdersPage {
+  orders: {
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    nodes: LiveCustomerOrder[];
+  };
 }
 
 const CUSTOMER_ORDERS_QUERY = `#graphql
@@ -237,6 +346,7 @@ const CUSTOMER_ORDERS_QUERY = `#graphql
           displayFinancialStatus
           displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
+          lineItems(first: 10) { nodes { title quantity } }
         }
       }
     }
@@ -246,11 +356,25 @@ export async function fetchCustomerOrders(
   admin: AdminGraphqlClient,
   customerGid: string,
   opts: { orders?: number; ordersAfter?: string | null } = {},
-): Promise<CustomerOrdersData["customer"]> {
+): Promise<OrdersPage | null> {
   const data = await runQuery<CustomerOrdersData>(admin, CUSTOMER_ORDERS_QUERY, {
     id: customerGid,
     orders: opts.orders ?? 10,
     ordersAfter: opts.ordersAfter ?? null,
   });
-  return data.customer;
+  if (!data.customer) return null;
+  return {
+    orders: {
+      pageInfo: data.customer.orders.pageInfo,
+      nodes: data.customer.orders.nodes.map((o) => ({
+        id: o.id,
+        name: o.name,
+        createdAt: o.createdAt,
+        displayFinancialStatus: o.displayFinancialStatus,
+        displayFulfillmentStatus: o.displayFulfillmentStatus,
+        totalPriceSet: o.totalPriceSet,
+        lineItems: o.lineItems?.nodes ?? [],
+      })),
+    },
+  };
 }

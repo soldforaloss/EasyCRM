@@ -33,7 +33,15 @@ import {
   isChannel,
   type BadgeTone,
 } from "../lib/crm/constants";
-import { displayName, formatDate, formatDateTime, formatMoney } from "../lib/format";
+import {
+  displayName,
+  formatDate,
+  formatDateTime,
+  formatDurationDays,
+  formatMoney,
+  initials,
+} from "../lib/format";
+import { computeInsights } from "../lib/crm/insights";
 import { StageBadge, TaskStatusBadge } from "../components/badges";
 import { ComposeMessage } from "../components/compose";
 import { ConfirmAction } from "../components/confirm";
@@ -66,7 +74,19 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 
   const numericId = contact.shopifyCustomerId.split("/").pop();
 
+  const insights = live
+    ? computeInsights({
+        amountSpent: live.amountSpent ? Number(live.amountSpent.amount) : contact.amountSpent,
+        numberOfOrders: live.numberOfOrders ? Number(live.numberOfOrders) : contact.ordersCount,
+        customerSince: live.createdAt,
+        firstOrderAt: live.firstOrderAt,
+        lastOrderAt: live.lastOrderAt,
+        orders: live.orders.nodes,
+      })
+    : null;
+
   return {
+    insights,
     contact: {
       id: contact.id,
       name: displayName(contact.firstName, contact.lastName),
@@ -79,6 +99,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       ordersCount: contact.ordersCount,
       amountSpent: contact.amountSpent,
       currencyCode: contact.currencyCode,
+      shopifyCustomerId: contact.shopifyCustomerId,
       tags: contact.tags.map((t) => ({ id: t.tag.id, name: t.tag.name })),
     },
     live,
@@ -212,11 +233,42 @@ function describeTimeline(item: {
   }
 }
 
+const TABS = ["Summary", "Orders", "Activity", "Notes & Tasks", "Details"] as const;
+type Tab = (typeof TABS)[number];
+
+const ACTIVITY_FILTERS: ReadonlyArray<{
+  id: string;
+  label: string;
+  types: string[] | null;
+}> = [
+  { id: "ALL", label: "All", types: null },
+  { id: "NOTE", label: "Notes", types: ["NOTE"] },
+  { id: "ORDER", label: "Orders", types: ["ORDER_PLACED"] },
+  { id: "MESSAGE", label: "Messages", types: ["EMAIL_SENT", "SMS_SENT"] },
+  { id: "TASK", label: "Tasks", types: ["TASK"] },
+  { id: "STAGE", label: "Stage", types: ["STAGE_CHANGED"] },
+];
+
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
+      <s-stack direction="block" gap="small-500">
+        <s-text color="subdued">{label}</s-text>
+        <s-heading>{value}</s-heading>
+        {sub ? <s-text color="subdued">{sub}</s-text> : null}
+      </s-stack>
+    </s-box>
+  );
+}
+
 export default function ContactDetail() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
-  const { contact, live } = data;
+  const { contact, live, insights } = data;
   useActionToast(actionData);
+
+  const [tab, setTab] = useState<Tab>("Summary");
+  const [activityFilter, setActivityFilter] = useState<string>("ALL");
 
   // Live order history with "Load more" pagination via the orders resource route.
   const ordersFetcher = useFetcher<typeof ordersLoader>();
@@ -226,8 +278,7 @@ export default function ContactDetail() {
   const [cursor, setCursor] = useState(
     live?.orders.pageInfo ?? { hasNextPage: false, endCursor: null },
   );
-  // The detail route module is reused across contacts, so reset order pagination on contact change
-  // (otherwise contact B would show contact A's loaded-more orders and an invalid cursor).
+  // The detail route module is reused across contacts, so reset order pagination on contact change.
   useEffect(() => {
     setExtraOrders([]);
     setCursor(live?.orders.pageInfo ?? { hasNextPage: false, endCursor: null });
@@ -242,17 +293,33 @@ export default function ContactDetail() {
 
   const allOrders = [...(live?.orders.nodes ?? []), ...extraOrders];
   const loadingMore = ordersFetcher.state !== "idle";
-
   function loadMoreOrders() {
     if (cursor.endCursor) {
       ordersFetcher.load(`/app/contacts/${contact.id}/orders?after=${cursor.endCursor}`);
     }
   }
 
+  const currency = live?.amountSpent?.currencyCode ?? contact.currencyCode;
   const liveSpent = live?.amountSpent
-    ? formatMoney(Number(live.amountSpent.amount), live.amountSpent.currencyCode)
-    : formatMoney(contact.amountSpent, contact.currencyCode);
+    ? formatMoney(Number(live.amountSpent.amount), currency)
+    : formatMoney(contact.amountSpent, currency);
   const liveOrderCount = live ? Number(live.numberOfOrders) : contact.ordersCount;
+  const location = [
+    live?.defaultAddress?.city,
+    live?.defaultAddress?.province || live?.defaultAddress?.country,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const activeFilter =
+    ACTIVITY_FILTERS.find((f) => f.id === activityFilter) ?? ACTIVITY_FILTERS[0];
+  const filteredTimeline = activeFilter.types
+    ? data.timeline.filter((t) => activeFilter.types!.includes(t.type))
+    : data.timeline;
+
+  const recentOrders = allOrders.slice(0, 3);
+  const recentActivity = data.timeline.slice(0, 5);
+  const openTasks = data.tasks.filter((t) => t.status !== "DONE");
 
   return (
     <s-page heading={contact.name}>
@@ -269,270 +336,483 @@ export default function ContactDetail() {
         </s-banner>
       )}
 
-      {/* Send message ---------------------------------------------------- */}
-      <s-section heading="Send a message">
-        {data.brevoConnected ? (
-          <ComposeMessage
-            heading="Send a message"
-            canEmail={Boolean(contact.email)}
-            canSms={Boolean(contact.phone)}
-            previewVars={data.previewVars}
-            templates={data.templates}
-            actionValue="sendMessage"
-            submitLabel="Send message"
-          />
-        ) : (
-          <s-stack direction="block" gap="base">
-            <s-paragraph color="subdued">
-              Connect Brevo in Settings to send email and SMS to this contact.
-            </s-paragraph>
-            <s-button href="/app/settings">Go to Settings</s-button>
-          </s-stack>
-        )}
-      </s-section>
-
-      {/* Order history -------------------------------------------------- */}
-      <s-section heading="Order history">
-        {allOrders.length === 0 ? (
-          <s-paragraph color="subdued">
-            No orders in the last 60 days. (Older orders require a broader Shopify scope —
-            see DECISIONS.md.)
-          </s-paragraph>
-        ) : (
-          <s-stack direction="block" gap="base">
-            <s-table variant="auto">
-              <s-table-header-row>
-                <s-table-header>Order</s-table-header>
-                <s-table-header>Date</s-table-header>
-                <s-table-header>Payment</s-table-header>
-                <s-table-header>Fulfillment</s-table-header>
-                <s-table-header>Total</s-table-header>
-              </s-table-header-row>
-              <s-table-body>
-                {allOrders.map((o) => {
-                  const numericOrderId = o.id.split("/").pop();
-                  return (
-                    <s-table-row key={o.id}>
-                      <s-table-cell>
-                        <s-link
-                          href={`https://${data.shop}/admin/orders/${numericOrderId}`}
-                          target="_blank"
-                        >
-                          {o.name}
-                        </s-link>
-                      </s-table-cell>
-                      <s-table-cell>{formatDate(o.createdAt)}</s-table-cell>
-                      <s-table-cell>
-                        <s-badge tone={financialTone(o.displayFinancialStatus)}>
-                          {o.displayFinancialStatus ?? "—"}
-                        </s-badge>
-                      </s-table-cell>
-                      <s-table-cell>{o.displayFulfillmentStatus ?? "—"}</s-table-cell>
-                      <s-table-cell>
-                        {o.totalPriceSet
-                          ? formatMoney(
-                              Number(o.totalPriceSet.shopMoney.amount),
-                              o.totalPriceSet.shopMoney.currencyCode,
-                            )
-                          : "—"}
-                      </s-table-cell>
-                    </s-table-row>
-                  );
-                })}
-              </s-table-body>
-            </s-table>
-            {cursor.hasNextPage && (
-              <s-button
-                onClick={loadMoreOrders}
-                variant="tertiary"
-                {...(loadingMore ? { loading: true } : {})}
-              >
-                Load more orders
-              </s-button>
-            )}
-          </s-stack>
-        )}
-      </s-section>
-
-      {/* Activity timeline ---------------------------------------------- */}
-      <s-section heading="Activity timeline">
-        {data.timeline.length === 0 ? (
-          <s-paragraph color="subdued">
-            No activity yet. Notes, orders, stage changes and messages will appear here.
-          </s-paragraph>
-        ) : (
-          <s-stack direction="block" gap="small-200">
-            {data.timeline.map((item) => (
-              <s-box key={item.id} padding="small-200" borderRadius="base" background="subdued">
-                <s-stack direction="inline" gap="base" alignItems="start">
-                  <s-icon
-                    type={isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].icon : "info"}
-                  />
-                  <s-stack direction="block" gap="small-500">
-                    <s-text type="strong">
-                      {isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].label : "Activity"}
-                    </s-text>
-                    <s-text>{describeTimeline(item)}</s-text>
-                  </s-stack>
-                  <s-text color="subdued">{formatDateTime(item.occurredAt)}</s-text>
-                </s-stack>
-              </s-box>
-            ))}
-          </s-stack>
-        )}
-      </s-section>
-
-      {/* Notes ----------------------------------------------------------- */}
-      <s-section heading="Notes">
+      {/* Identity header ------------------------------------------------- */}
+      <s-section>
         <s-stack direction="block" gap="base">
-          <Form method="post">
-            <input type="hidden" name="_action" value="addNote" />
-            <s-stack direction="block" gap="small-200">
-              <s-text-area name="body" label="Add a note" rows={3} required />
-              <s-button type="submit" variant="primary">
-                Add note
-              </s-button>
-            </s-stack>
-          </Form>
-
-          {data.notes.map((note) => (
-            <s-box key={note.id} padding="base" borderWidth="base" borderRadius="base">
-              <s-stack direction="block" gap="small-200">
-                <s-text color="subdued">{formatDateTime(note.createdAt)}</s-text>
-                <Form method="post">
-                  <input type="hidden" name="_action" value="editNote" />
-                  <input type="hidden" name="noteId" value={note.id} />
-                  <s-stack direction="block" gap="small-200">
-                    <s-text-area name="body" label="Note" value={note.body} rows={3} />
-                    <s-stack direction="inline" gap="base">
-                      <s-button type="submit" variant="secondary">
-                        Save
-                      </s-button>
-                    </s-stack>
-                  </s-stack>
-                </Form>
-                <ConfirmAction
-                  id={`confirm-del-note-${note.id}`}
-                  triggerLabel="Delete note"
-                  heading="Delete note?"
-                  message="This note will be permanently removed."
-                  confirmLabel="Delete note"
-                  fields={{ _action: "deleteNote", noteId: note.id }}
-                />
+          <s-stack direction="inline" gap="base" alignItems="center">
+            <s-avatar initials={initials(contact.firstName, contact.lastName)} size="base" alt={contact.name} />
+            <s-stack direction="block" gap="small-500">
+              <s-stack direction="inline" gap="small-200" alignItems="center">
+                <s-heading>{contact.name}</s-heading>
+                <StageBadge stage={contact.stage} />
+                {live?.verifiedEmail ? <s-badge tone="success">Verified email</s-badge> : null}
+                {insights?.atRisk ? <s-badge tone="critical">At risk</s-badge> : null}
               </s-stack>
-            </s-box>
+              <s-stack direction="inline" gap="base">
+                {contact.email ? (
+                  <s-link href={`mailto:${contact.email}`}>{contact.email}</s-link>
+                ) : (
+                  <s-text color="subdued">No email</s-text>
+                )}
+                {contact.phone ? <s-link href={`tel:${contact.phone}`}>{contact.phone}</s-link> : null}
+                {location ? <s-text color="subdued">{location}</s-text> : null}
+              </s-stack>
+            </s-stack>
+          </s-stack>
+          {contact.tags.length > 0 && (
+            <s-stack direction="inline" gap="small-200">
+              {contact.tags.map((t) => (
+                <s-badge key={t.id} tone="neutral">
+                  {t.name}
+                </s-badge>
+              ))}
+            </s-stack>
+          )}
+        </s-stack>
+      </s-section>
+
+      {/* KPI bar --------------------------------------------------------- */}
+      <s-section>
+        <s-grid gridTemplateColumns="1fr 1fr 1fr 1fr" gap="base">
+          <Stat label="Lifetime value" value={liveSpent} />
+          <Stat label="Orders" value={String(liveOrderCount)} />
+          <Stat label="Avg order value" value={insights ? formatMoney(insights.aov, currency) : "—"} />
+          <Stat
+            label="Last order"
+            value={live?.lastOrderAt ? formatDate(live.lastOrderAt) : "—"}
+            sub={
+              insights?.daysSinceLastOrder != null
+                ? `${formatDurationDays(insights.daysSinceLastOrder)} ago`
+                : undefined
+            }
+          />
+          <Stat
+            label="Customer since"
+            value={live ? formatDate(live.createdAt) : "—"}
+            sub={insights?.tenureDays != null ? formatDurationDays(insights.tenureDays) : undefined}
+          />
+          <Stat
+            label="Order frequency"
+            value={insights?.avgDaysBetweenOrders != null ? `~${insights.avgDaysBetweenOrders} days` : "—"}
+          />
+          <Stat label="Email marketing" value={live?.emailMarketingState ?? "—"} />
+          <Stat label="SMS marketing" value={live?.smsMarketingState ?? "—"} />
+        </s-grid>
+      </s-section>
+
+      {/* Tabs ------------------------------------------------------------ */}
+      <s-section>
+        <s-stack direction="inline" gap="small-200">
+          {TABS.map((t) => (
+            <s-button
+              key={t}
+              variant={tab === t ? "primary" : "tertiary"}
+              onClick={() => setTab(t)}
+            >
+              {t}
+            </s-button>
           ))}
         </s-stack>
       </s-section>
 
-      {/* Tasks ----------------------------------------------------------- */}
-      <s-section heading="Tasks">
-        <s-stack direction="block" gap="base">
-          <Form method="post">
-            <input type="hidden" name="_action" value="createTask" />
-            <s-stack direction="inline" gap="base" alignItems="end">
-              <s-text-field name="title" label="New task" placeholder="Follow up…" required />
-              <s-date-field name="dueAt" label="Due date" />
-              <s-button type="submit" variant="primary">
-                Add task
-              </s-button>
-            </s-stack>
-          </Form>
+      {/* SUMMARY --------------------------------------------------------- */}
+      {tab === "Summary" && (
+        <>
+          {insights?.atRisk && (
+            <s-banner tone="warning" heading="This customer may be at risk of churning">
+              <s-paragraph>
+                No order in {formatDurationDays(insights.daysSinceLastOrder)}, well beyond their
+                usual ~{insights.avgDaysBetweenOrders}-day cadence. Consider a re-engagement
+                message.
+              </s-paragraph>
+            </s-banner>
+          )}
 
-          {data.tasks.length === 0 ? (
-            <s-paragraph color="subdued">No tasks for this contact.</s-paragraph>
+          {insights && insights.topProducts.length > 0 && (
+            <s-section heading="Top products">
+              <s-stack direction="block" gap="small-200">
+                {insights.topProducts.map((p) => (
+                  <s-stack key={p.title} direction="inline" gap="base" alignItems="center">
+                    <s-text type="strong">{p.title}</s-text>
+                    <s-text color="subdued">×{p.quantity}</s-text>
+                  </s-stack>
+                ))}
+              </s-stack>
+            </s-section>
+          )}
+
+          <s-section heading="Recent orders">
+            {recentOrders.length === 0 ? (
+              <s-paragraph color="subdued">No recent orders.</s-paragraph>
+            ) : (
+              <s-stack direction="block" gap="small-200">
+                {recentOrders.map((o) => {
+                  const oid = o.id.split("/").pop();
+                  return (
+                    <s-box key={o.id} padding="small-200" borderRadius="base" background="subdued">
+                      <s-stack direction="inline" gap="base" alignItems="center">
+                        <s-link href={`https://${data.shop}/admin/orders/${oid}`} target="_blank">
+                          {o.name}
+                        </s-link>
+                        <s-badge tone={financialTone(o.displayFinancialStatus)}>
+                          {o.displayFinancialStatus ?? "—"}
+                        </s-badge>
+                        <s-text color="subdued">{formatDate(o.createdAt)}</s-text>
+                        <s-text type="strong">
+                          {o.totalPriceSet
+                            ? formatMoney(
+                                Number(o.totalPriceSet.shopMoney.amount),
+                                o.totalPriceSet.shopMoney.currencyCode,
+                              )
+                            : "—"}
+                        </s-text>
+                      </s-stack>
+                    </s-box>
+                  );
+                })}
+                <s-button variant="tertiary" onClick={() => setTab("Orders")}>
+                  View all orders
+                </s-button>
+              </s-stack>
+            )}
+          </s-section>
+
+          <s-section heading="Recent activity">
+            {recentActivity.length === 0 ? (
+              <s-paragraph color="subdued">No activity yet.</s-paragraph>
+            ) : (
+              <s-stack direction="block" gap="small-200">
+                {recentActivity.map((item) => (
+                  <s-stack key={item.id} direction="inline" gap="base" alignItems="center">
+                    <s-icon
+                      type={isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].icon : "info"}
+                    />
+                    <s-text type="strong">
+                      {isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].label : "Activity"}
+                    </s-text>
+                    <s-text>{describeTimeline(item)}</s-text>
+                    <s-text color="subdued">{formatDateTime(item.occurredAt)}</s-text>
+                  </s-stack>
+                ))}
+                <s-button variant="tertiary" onClick={() => setTab("Activity")}>
+                  View full timeline
+                </s-button>
+              </s-stack>
+            )}
+          </s-section>
+
+          {openTasks.length > 0 && (
+            <s-section heading="Open tasks">
+              <s-stack direction="block" gap="small-200">
+                {openTasks.map((t) => (
+                  <s-stack key={t.id} direction="inline" gap="base" alignItems="center">
+                    <TaskStatusBadge status={t.status} />
+                    <s-text type="strong">{t.title}</s-text>
+                    {t.dueAt ? <s-text color="subdued">Due {formatDate(t.dueAt)}</s-text> : null}
+                  </s-stack>
+                ))}
+              </s-stack>
+            </s-section>
+          )}
+
+          <s-section heading="Send a message">
+            {data.brevoConnected ? (
+              <ComposeMessage
+                heading="Send a message"
+                canEmail={Boolean(contact.email)}
+                canSms={Boolean(contact.phone)}
+                previewVars={data.previewVars}
+                templates={data.templates}
+                actionValue="sendMessage"
+                submitLabel="Send message"
+              />
+            ) : (
+              <s-stack direction="block" gap="base">
+                <s-paragraph color="subdued">
+                  Connect Brevo in Settings to send email and SMS to this contact.
+                </s-paragraph>
+                <s-button href="/app/settings">Go to Settings</s-button>
+              </s-stack>
+            )}
+          </s-section>
+        </>
+      )}
+
+      {/* ORDERS ---------------------------------------------------------- */}
+      {tab === "Orders" && (
+        <s-section heading="Order history">
+          {allOrders.length === 0 ? (
+            <s-paragraph color="subdued">
+              No orders in the last 60 days. (Older orders require a broader Shopify scope — see
+              DECISIONS.md.)
+            </s-paragraph>
           ) : (
-            <s-stack direction="block" gap="small-200">
-              {data.tasks.map((task) => (
-                <s-box
-                  key={task.id}
-                  padding="small-200"
-                  borderRadius="base"
-                  background="subdued"
+            <s-stack direction="block" gap="base">
+              <s-table variant="auto">
+                <s-table-header-row>
+                  <s-table-header>Order</s-table-header>
+                  <s-table-header>Date</s-table-header>
+                  <s-table-header>Payment</s-table-header>
+                  <s-table-header>Fulfillment</s-table-header>
+                  <s-table-header>Items</s-table-header>
+                  <s-table-header>Total</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {allOrders.map((o) => {
+                    const oid = o.id.split("/").pop();
+                    const itemCount = o.lineItems.reduce((n, li) => n + (li.quantity || 0), 0);
+                    return (
+                      <s-table-row key={o.id}>
+                        <s-table-cell>
+                          <s-link href={`https://${data.shop}/admin/orders/${oid}`} target="_blank">
+                            {o.name}
+                          </s-link>
+                        </s-table-cell>
+                        <s-table-cell>{formatDate(o.createdAt)}</s-table-cell>
+                        <s-table-cell>
+                          <s-badge tone={financialTone(o.displayFinancialStatus)}>
+                            {o.displayFinancialStatus ?? "—"}
+                          </s-badge>
+                        </s-table-cell>
+                        <s-table-cell>{o.displayFulfillmentStatus ?? "—"}</s-table-cell>
+                        <s-table-cell>{itemCount || "—"}</s-table-cell>
+                        <s-table-cell>
+                          {o.totalPriceSet
+                            ? formatMoney(
+                                Number(o.totalPriceSet.shopMoney.amount),
+                                o.totalPriceSet.shopMoney.currencyCode,
+                              )
+                            : "—"}
+                        </s-table-cell>
+                      </s-table-row>
+                    );
+                  })}
+                </s-table-body>
+              </s-table>
+              {cursor.hasNextPage && (
+                <s-button
+                  onClick={loadMoreOrders}
+                  variant="tertiary"
+                  {...(loadingMore ? { loading: true } : {})}
                 >
-                  <s-stack direction="inline" gap="base" alignItems="center">
-                    <TaskStatusBadge status={task.status} />
-                    <s-stack direction="block" gap="small-500">
-                      <s-text type="strong">{task.title}</s-text>
-                      {task.dueAt && (
-                        <s-text color="subdued">Due {formatDate(task.dueAt)}</s-text>
-                      )}
-                    </s-stack>
-                    <Form method="post">
-                      <input type="hidden" name="_action" value="toggleTask" />
-                      <input type="hidden" name="taskId" value={task.id} />
-                      <input
-                        type="hidden"
-                        name="status"
-                        value={task.status === "DONE" ? "OPEN" : "DONE"}
+                  Load more orders
+                </s-button>
+              )}
+            </s-stack>
+          )}
+        </s-section>
+      )}
+
+      {/* ACTIVITY -------------------------------------------------------- */}
+      {tab === "Activity" && (
+        <s-section heading="Activity timeline">
+          <s-stack direction="block" gap="base">
+            <s-stack direction="inline" gap="small-200">
+              {ACTIVITY_FILTERS.map((f) => (
+                <s-button
+                  key={f.id}
+                  variant={activityFilter === f.id ? "primary" : "tertiary"}
+                  onClick={() => setActivityFilter(f.id)}
+                >
+                  {f.label}
+                </s-button>
+              ))}
+            </s-stack>
+            {filteredTimeline.length === 0 ? (
+              <s-paragraph color="subdued">No matching activity.</s-paragraph>
+            ) : (
+              <s-stack direction="block" gap="small-200">
+                {filteredTimeline.map((item) => (
+                  <s-box key={item.id} padding="small-200" borderRadius="base" background="subdued">
+                    <s-stack direction="inline" gap="base" alignItems="start">
+                      <s-icon
+                        type={isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].icon : "info"}
                       />
-                      <s-button type="submit" variant="tertiary">
-                        {task.status === "DONE" ? "Reopen" : "Mark done"}
-                      </s-button>
+                      <s-stack direction="block" gap="small-500">
+                        <s-text type="strong">
+                          {isActivityType(item.type)
+                            ? ACTIVITY_TYPE_META[item.type].label
+                            : "Activity"}
+                        </s-text>
+                        <s-text>{describeTimeline(item)}</s-text>
+                      </s-stack>
+                      <s-text color="subdued">{formatDateTime(item.occurredAt)}</s-text>
+                    </s-stack>
+                  </s-box>
+                ))}
+              </s-stack>
+            )}
+          </s-stack>
+        </s-section>
+      )}
+
+      {/* NOTES & TASKS --------------------------------------------------- */}
+      {tab === "Notes & Tasks" && (
+        <>
+          <s-section heading="Notes">
+            <s-stack direction="block" gap="base">
+              <Form method="post">
+                <input type="hidden" name="_action" value="addNote" />
+                <s-stack direction="block" gap="small-200">
+                  <s-text-area name="body" label="Add a note" rows={3} required />
+                  <s-button type="submit" variant="primary">
+                    Add note
+                  </s-button>
+                </s-stack>
+              </Form>
+
+              {data.notes.map((note) => (
+                <s-box key={note.id} padding="base" borderWidth="base" borderRadius="base">
+                  <s-stack direction="block" gap="small-200">
+                    <s-text color="subdued">{formatDateTime(note.createdAt)}</s-text>
+                    <Form method="post">
+                      <input type="hidden" name="_action" value="editNote" />
+                      <input type="hidden" name="noteId" value={note.id} />
+                      <s-stack direction="block" gap="small-200">
+                        <s-text-area name="body" label="Note" value={note.body} rows={3} />
+                        <s-stack direction="inline" gap="base">
+                          <s-button type="submit" variant="secondary">
+                            Save
+                          </s-button>
+                        </s-stack>
+                      </s-stack>
                     </Form>
+                    <ConfirmAction
+                      id={`confirm-del-note-${note.id}`}
+                      triggerLabel="Delete note"
+                      heading="Delete note?"
+                      message="This note will be permanently removed."
+                      confirmLabel="Delete note"
+                      fields={{ _action: "deleteNote", noteId: note.id }}
+                    />
                   </s-stack>
                 </s-box>
               ))}
             </s-stack>
-          )}
-        </s-stack>
-      </s-section>
+          </s-section>
 
-      {/* Aside: profile, stage, tags, spend ----------------------------- */}
-      <s-section slot="aside" heading="Profile">
-        <s-stack direction="block" gap="small-200">
-          <s-text>
-            <s-text type="strong">Email: </s-text>
-            {contact.email ?? "—"}
-          </s-text>
-          <s-text>
-            <s-text type="strong">Phone: </s-text>
-            {contact.phone ?? "—"}
-          </s-text>
-          {contact.source && (
-            <s-text>
-              <s-text type="strong">Source: </s-text>
-              {contact.source}
-            </s-text>
-          )}
-          {live && (
-            <>
+          <s-section heading="Tasks">
+            <s-stack direction="block" gap="base">
+              <Form method="post">
+                <input type="hidden" name="_action" value="createTask" />
+                <s-stack direction="inline" gap="base" alignItems="end">
+                  <s-text-field name="title" label="New task" placeholder="Follow up…" required />
+                  <s-date-field name="dueAt" label="Due date" />
+                  <s-button type="submit" variant="primary">
+                    Add task
+                  </s-button>
+                </s-stack>
+              </Form>
+
+              {data.tasks.length === 0 ? (
+                <s-paragraph color="subdued">No tasks for this contact.</s-paragraph>
+              ) : (
+                <s-stack direction="block" gap="small-200">
+                  {data.tasks.map((task) => (
+                    <s-box
+                      key={task.id}
+                      padding="small-200"
+                      borderRadius="base"
+                      background="subdued"
+                    >
+                      <s-stack direction="inline" gap="base" alignItems="center">
+                        <TaskStatusBadge status={task.status} />
+                        <s-stack direction="block" gap="small-500">
+                          <s-text type="strong">{task.title}</s-text>
+                          {task.dueAt && (
+                            <s-text color="subdued">Due {formatDate(task.dueAt)}</s-text>
+                          )}
+                        </s-stack>
+                        <Form method="post">
+                          <input type="hidden" name="_action" value="toggleTask" />
+                          <input type="hidden" name="taskId" value={task.id} />
+                          <input
+                            type="hidden"
+                            name="status"
+                            value={task.status === "DONE" ? "OPEN" : "DONE"}
+                          />
+                          <s-button type="submit" variant="tertiary">
+                            {task.status === "DONE" ? "Reopen" : "Mark done"}
+                          </s-button>
+                        </Form>
+                      </s-stack>
+                    </s-box>
+                  ))}
+                </s-stack>
+              )}
+            </s-stack>
+          </s-section>
+        </>
+      )}
+
+      {/* DETAILS --------------------------------------------------------- */}
+      {tab === "Details" && (
+        <>
+          <s-section heading="Profile">
+            <s-stack direction="block" gap="small-200">
+              <s-text>
+                <s-text type="strong">Email: </s-text>
+                {contact.email ?? "—"}
+                {live?.verifiedEmail ? " (verified)" : ""}
+              </s-text>
+              <s-text>
+                <s-text type="strong">Phone: </s-text>
+                {contact.phone ?? "—"}
+              </s-text>
               <s-text>
                 <s-text type="strong">Email marketing: </s-text>
-                {live.emailMarketingState ?? "—"}
+                {live?.emailMarketingState ?? "—"}
               </s-text>
               <s-text>
                 <s-text type="strong">SMS marketing: </s-text>
-                {live.smsMarketingState ?? "—"}
+                {live?.smsMarketingState ?? "—"}
               </s-text>
-            </>
-          )}
-          {live?.defaultAddress?.formatted && (
-            <s-stack direction="block" gap="small-500">
-              <s-text type="strong">Default address</s-text>
-              {live.defaultAddress.formatted.map((line, i) => (
-                <s-text key={i} color="subdued">
-                  {line}
+              {contact.source && (
+                <s-text>
+                  <s-text type="strong">Source: </s-text>
+                  {contact.source}
                 </s-text>
-              ))}
+              )}
+              <s-text>
+                <s-text type="strong">Shopify ID: </s-text>
+                {contact.shopifyCustomerId}
+              </s-text>
+              {live?.note && (
+                <s-text>
+                  <s-text type="strong">Shopify note: </s-text>
+                  {live.note}
+                </s-text>
+              )}
             </s-stack>
+          </s-section>
+
+          {live?.defaultAddress?.formatted && (
+            <s-section heading="Default address">
+              <s-stack direction="block" gap="small-500">
+                {live.defaultAddress.formatted.map((line, i) => (
+                  <s-text key={i} color="subdued">
+                    {line}
+                  </s-text>
+                ))}
+              </s-stack>
+            </s-section>
           )}
-        </s-stack>
-      </s-section>
 
-      <s-section slot="aside" heading="Spend">
-        <s-stack direction="block" gap="small-200">
-          <s-text>
-            <s-text type="strong">Lifetime spend: </s-text>
-            {liveSpent}
-          </s-text>
-          <s-text>
-            <s-text type="strong">Orders: </s-text>
-            {liveOrderCount}
-          </s-text>
-        </s-stack>
-      </s-section>
+          {live && live.tags.length > 0 && (
+            <s-section heading="Shopify tags">
+              <s-stack direction="inline" gap="small-200">
+                {live.tags.map((t) => (
+                  <s-badge key={t} tone="neutral">
+                    {t}
+                  </s-badge>
+                ))}
+              </s-stack>
+            </s-section>
+          )}
+        </>
+      )}
 
+      {/* Aside: management rail ------------------------------------------ */}
       <s-section slot="aside" heading="Lifecycle stage">
         <s-stack direction="block" gap="small-200">
           <StageBadge stage={contact.stage} />

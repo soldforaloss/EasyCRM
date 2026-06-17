@@ -66,18 +66,31 @@ String used elsewhere for money): it is a non-authoritative, denormalized sort/f
 a String column would sort lexicographically. This is the one deliberate exception to the
 "money is a String" rule in §2 — it is never used for financial calculation, only ordering.
 
-**Spend-cache maintenance (revised after review):** the cache is maintained by exactly two
-paths — the install backfill (absolute, from GraphQL `amountSpent`/`numberOfOrders`) and
-`orders/create|paid` webhook **increments**. The `customers/create|update` webhook does **not**
-write spend signals: Shopify removed `total_spent`/`orders_count`/`last_order_*` from the customer
-webhook payload (2025-01+), and mixing absolute writes with increments would let the cache drift.
-Order webhooks are made idempotent by a dedicated **`ProcessedOrder`** table with a unique
-`(shop, orderGid)` constraint — the first delivery of an order GID "wins" (atomic insert),
-so concurrent `orders/create` + `orders/paid` deliveries can't double-count or duplicate the
-timeline event. `lastOrderAt` is advanced monotonically so out-of-order delivery can't regress it.
-The authoritative spend is always fetched live on the detail page, so cache drift (e.g. from
-refunds, which don't decrement) is cosmetic for list sort/filter only. Documented so the
-"spend is live" principle and the "filter by spend tier" requirement coexist coherently.
+**Spend-cache maintenance (live-refresh model):** the cache (`amountSpent`/`ordersCount`/
+`currencyCode`/`lastOrderAt`) is kept current by a **live per-customer GraphQL refresh** —
+`refreshContactFromShopify` fetches authoritative `amountSpent`/`numberOfOrders`/`lastOrder`
+and writes them absolutely. It runs on the **install backfill** and on **every `customers/*`
+and `orders/*` webhook** (the handlers call `upsertAndRefreshContact` / `recordOrderAndRefresh`
+with the webhook's `admin` context). This is the authoritative source — it stays correct after
+refunds, edits and cancellations even though Shopify removed `total_spent`/`orders_count` from
+the customer webhook payload (2025-01+). The `orders/*` increment remains only as an **optimistic
+fallback** if a refresh fails (transient rate-limit); the refresh, when it succeeds, overwrites
+it with the truth, so there is no increment-vs-absolute drift in steady state.
+
+Order webhooks are made idempotent for the **timeline event** by a dedicated **`ProcessedOrder`**
+table with a unique `(shop, orderGid)` constraint — the first delivery of an order GID "wins"
+(atomic insert), so concurrent `orders/create` + `orders/paid` deliveries can't duplicate the
+`ORDER_PLACED` activity or double-apply the optimistic increment. `lastOrderAt` is advanced
+monotonically in the increment path; the refresh sets the authoritative last-order date. The
+detail page always shows live figures regardless. `amountSpent` is a **`Float`** sort/filter key
+(see above) — the one deliberate exception to the "money is a String" rule.
+
+The detail page is a **Customer 360**: a tabbed record (Summary/Orders/Activity/Notes &
+Tasks/Details) with an identity header, a KPI bar, and derived **insights** (`app/lib/crm/insights.ts`:
+AOV, days-since-last-order, tenure, order frequency, at-risk flag, top products) computed from
+live Shopify data. The customer GraphQL query uses the non-deprecated `defaultEmailAddress` /
+`defaultPhoneNumber` fields (the legacy `email`/`phone`/`*MarketingConsent` fields are deprecated
+at 2026-04).
 
 ## 4. Scopes (minimal)
 
