@@ -1,0 +1,41 @@
+# Fly.io deployment config for Easy CRM.
+#
+# Constraints this file encodes (see DECISIONS.md §11, §16):
+#   - The in-process job worker needs an ALWAYS-ON machine: auto_stop is disabled and one
+#     machine is always running. Do not enable auto_stop without moving the worker elsewhere.
+#   - The app listens on PORT=3000; /healthz is the readiness/liveness probe (200 = healthy,
+#     503 = database unreachable).
+#   - Secrets (never in this file): DATABASE_URL, ENCRYPTION_KEY, SHOPIFY_API_KEY,
+#     SHOPIFY_API_SECRET, SHOPIFY_APP_URL. Set them with `fly secrets set`. See DEPLOY.md.
+#
+# The app name below must be globally unique on Fly — change it if taken, and keep
+# SHOPIFY_APP_URL + shopify.app.toml application_url in sync with the resulting hostname.
+
+app = "easy-crm"
+primary_region = "phx" # Phoenix — matches the stores' timezone (America/Phoenix)
+
+[build]
+# Uses the repository Dockerfile (multi-stage; runs migrations on boot via docker-start).
+
+[env]
+PORT = "3000"
+RUN_JOB_WORKER = "true"
+LOG_LEVEL = "info"
+
+[http_service]
+internal_port = 3000
+force_https = true
+auto_stop_machines = false # job worker must stay alive between requests
+auto_start_machines = true
+min_machines_running = 1
+
+[[http_service.checks]]
+interval = "30s"
+timeout = "5s"
+grace_period = "20s" # allows `prisma migrate deploy` to finish on boot
+method = "GET"
+path = "/healthz"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "1gb"
