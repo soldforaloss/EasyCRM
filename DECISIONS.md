@@ -313,6 +313,12 @@ It is now a multi-stage build: the full dependency tree in the builder stage, on
 plus production dependencies in the runtime stage, running as the non-root `node` user.
 `.dockerignore` was extended so `.env` and local SQLite state can never be baked into an image.
 
+2026-08-04 follow-up, found by the first real container boot: `docker-start` ran `npm run setup`,
+whose `prisma generate` tried to rewrite the root-owned `/app/node_modules/.prisma` under
+`USER node` and crashed the container (EACCES). The client is already generated at image build
+time, so `docker-start` now runs only `prisma migrate deploy && npm run start`. `npm run setup`
+remains for non-Docker hosts. Verified: image builds, boots, and `/healthz` returns 200.
+
 ## 17. Still outstanding
 
 - **Billing remains a stub** (§6). `requireActivePlan` returns `active: true`. Wire it up before
