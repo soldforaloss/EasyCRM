@@ -11,8 +11,8 @@
 # The app name below must be globally unique on Fly — change it if taken, and keep
 # SHOPIFY_APP_URL + shopify.app.toml application_url in sync with the resulting hostname.
 
-app = "easy-crm"
-primary_region = "phx" # Phoenix — matches the stores' timezone (America/Phoenix)
+app = "easycrm-commonhype"
+primary_region = "lax" # closest Fly region to the Arizona stores (Fly has no Phoenix region)
 
 [build]
 # Uses the repository Dockerfile (multi-stage; runs migrations on boot via docker-start).

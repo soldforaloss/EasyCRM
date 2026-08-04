@@ -2,7 +2,7 @@
 
 client_id = "01e2f5c1d5399b0925de511a7f87dabc"
 name = "EasyCrm"
-application_url = "https://example.com"
+application_url = "https://easycrm-commonhype.fly.dev"
 embedded = true
 
 [build]
@@ -59,4 +59,8 @@ api_version = "2026-04"
 scopes = "read_customers,read_orders,read_locations"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://easycrm-commonhype.fly.dev/auth/callback",
+  "https://easycrm-commonhype.fly.dev/auth/login",
+  "https://easycrm-commonhype.fly.dev/api/auth"
+]

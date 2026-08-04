@@ -8,46 +8,25 @@ Hosting requirement: an **always-on container host** (the in-process job worker 
 freeze-between-requests serverless — DECISIONS.md §11). The steps below use Fly.io because
 `flyctl` is already installed on this machine (`scoop`), but any Docker host works the same way.
 
-## 1. Fly.io path
+## 1. Fly.io path — DONE 2026-08-04
 
-```bash
-flyctl auth login
-```
+This was executed on 2026-08-04. Live state:
 
-```bash
-flyctl launch --no-deploy --copy-config
-```
+- App: **easycrm-commonhype** (region `lax` — Fly has no Phoenix region), URL
+  `https://easycrm-commonhype.fly.dev`, one always-on shared-cpu-1x/1GB machine per `fly.toml`.
+- Postgres: cluster **easycrm-db** (lax, single node, 3GB volume), attached — `DATABASE_URL` is a
+  Fly secret.
+- Secrets set: `DATABASE_URL`, `ENCRYPTION_KEY` (fresh, prod-only), `SHOPIFY_API_KEY`,
+  `SHOPIFY_API_SECRET` (from `shopify app env show`), `SHOPIFY_APP_URL`.
 
-(Keeps the committed `fly.toml`. If the `easy-crm` app name is taken, accept a new name and
-remember it — it becomes your hostname.)
-
-Provision Postgres (managed Fly Postgres is fine for the pilot):
-
-```bash
-flyctl postgres create --name easy-crm-db --region phx --initial-cluster-size 1 --vm-size shared-cpu-1x --volume-size 3
-```
-
-```bash
-flyctl postgres attach easy-crm-db
-```
-
-(`attach` sets `DATABASE_URL` as a secret automatically.)
-
-Set the remaining secrets (values from your Partner Dashboard app credentials; generate a fresh
-ENCRYPTION_KEY, don't reuse the dev one):
-
-```bash
-flyctl secrets set ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))") SHOPIFY_API_KEY=<client id> SHOPIFY_API_SECRET=<client secret> SHOPIFY_APP_URL=https://<your-app-name>.fly.dev
-```
-
-Deploy:
+Redeploy after code changes:
 
 ```bash
 flyctl deploy
 ```
 
-Verify: `https://<app>.fly.dev/healthz` returns `{"status":"ok",...}` and `?deep=1` shows the
-job queue.
+Verify: `https://easycrm-commonhype.fly.dev/healthz` returns `{"status":"ok",...}` and `?deep=1`
+shows the job queue.
 
 ## 2. Any-other-Docker-host path
 
