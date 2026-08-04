@@ -46,6 +46,14 @@ function buildWhere(shop: string, params: ContactListParams): Prisma.ContactWher
     and.push({ tags: { some: { tagId: { in: params.tagIds } } } });
   }
 
+  if (params.locationIds && params.locationIds.length > 0) {
+    and.push({
+      contactLocations: {
+        some: { shop, locationId: { in: params.locationIds } },
+      },
+    });
+  }
+
   if (params.spendTiers && params.spendTiers.length > 0) {
     const ranges: Prisma.ContactWhereInput[] = [];
     for (const id of params.spendTiers) {

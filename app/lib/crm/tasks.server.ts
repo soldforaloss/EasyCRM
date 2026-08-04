@@ -17,6 +17,7 @@ export interface TaskFilter {
   status?: TaskStatus;
   contactId?: string;
   assigneeStaffId?: string;
+  locationId?: string;
 }
 
 export type TaskWithContact = Prisma.TaskGetPayload<{
@@ -33,6 +34,13 @@ export async function listTasks(
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.contactId ? { contactId: filter.contactId } : {}),
       ...(filter.assigneeStaffId ? { assigneeStaffId: filter.assigneeStaffId } : {}),
+      ...(filter.locationId
+        ? {
+            contact: {
+              contactLocations: { some: { shop, locationId: filter.locationId } },
+            },
+          }
+        : {}),
     },
     // dueAt asc puts NULLs first on SQLite; the global view regroups by bucket anyway.
     orderBy: [{ status: "asc" }, { dueAt: "asc" }, { createdAt: "desc" }],
@@ -125,6 +133,8 @@ export interface GroupedTasks {
 
 /** Group tasks into due-buckets for the global Tasks view. */
 export function groupTasks(tasks: TaskWithContact[], now = new Date()): GroupedTasks {
+  // Server-local bucketing is acceptable while each merchant operates in one timezone
+  // (currently America/Phoenix); revisit before supporting multi-timezone task queues.
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const endOfToday = new Date(startOfToday.getTime() + 86_400_000);
   const groups: GroupedTasks = {

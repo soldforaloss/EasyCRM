@@ -29,6 +29,7 @@ export function parseContactListParams(
     search: searchParams.get("q")?.trim() ?? "",
     stages: searchParams.getAll("stage").filter(isLifecycleStage) as LifecycleStage[],
     tagIds: searchParams.getAll("tag").filter(Boolean),
+    locationIds: searchParams.getAll("location").filter(Boolean),
     spendTiers: searchParams.getAll("spend").filter(Boolean),
     sortField,
     sortDir: searchParams.get("dir") === "asc" ? "asc" : "desc",
@@ -43,6 +44,7 @@ export function contactListParamsToSearch(params: ContactListParams): URLSearchP
   if (params.search) sp.set("q", params.search);
   for (const s of params.stages ?? []) sp.append("stage", s);
   for (const t of params.tagIds ?? []) sp.append("tag", t);
+  for (const locationId of params.locationIds ?? []) sp.append("location", locationId);
   for (const s of params.spendTiers ?? []) sp.append("spend", s);
   if (params.sortField !== "updatedAt") sp.set("sort", params.sortField);
   if (params.sortDir !== "desc") sp.set("dir", params.sortDir);
@@ -57,6 +59,7 @@ export function filterToSearch(filter: ContactFilter): URLSearchParams {
   if (filter.search) sp.set("q", filter.search);
   for (const s of filter.stages ?? []) sp.append("stage", s);
   for (const t of filter.tagIds ?? []) sp.append("tag", t);
+  for (const locationId of filter.locationIds ?? []) sp.append("location", locationId);
   for (const s of filter.spendTiers ?? []) sp.append("spend", s);
   return sp;
 }
@@ -67,6 +70,7 @@ export function paramsToFilter(params: ContactListParams): ContactFilter {
     search: params.search ?? "",
     stages: params.stages ?? [],
     tagIds: params.tagIds ?? [],
+    locationIds: params.locationIds ?? [],
     spendTiers: params.spendTiers ?? [],
   };
 }
@@ -77,6 +81,7 @@ export function hasActiveFilter(params: ContactListParams): boolean {
     params.search ||
       (params.stages && params.stages.length) ||
       (params.tagIds && params.tagIds.length) ||
+      (params.locationIds && params.locationIds.length) ||
       (params.spendTiers && params.spendTiers.length),
   );
 }

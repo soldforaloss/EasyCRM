@@ -44,6 +44,7 @@ import {
   formatDateTime,
   formatDurationDays,
   formatMoney,
+  formatRelativeDay,
   initials,
 } from "../lib/format";
 import { computeInsights } from "../lib/crm/insights";
@@ -56,12 +57,19 @@ import { StageSelector } from "../components/stage-selector";
 import { SmsThread, EmailThread } from "../components/message-thread";
 import { useActionToast } from "../lib/use-action-toast";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
+import prisma from "../db.server";
+import { dateStringInTz } from "../lib/timezone";
+import { logOutreach } from "../lib/crm/outreach.server";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
   const contact = await getContact(shop, params.id ?? "");
   if (!contact) throw new Response("Contact not found", { status: 404 });
+  const now = new Date();
+  const visitDateCandidates = [-1, 0, 1].map((offset) =>
+    dateStringInTz(new Date(now.getTime() + offset * 86_400_000), "UTC"),
+  );
 
   let live = null;
   let liveError: string | null = null;
@@ -72,7 +80,20 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     liveError = error instanceof Error ? error.message : "Could not load live customer data.";
   }
 
-  const [notes, activities, tasks, templates, brevoStatus, varsMap, messages] =
+  const [
+    notes,
+    activities,
+    tasks,
+    templates,
+    brevoStatus,
+    varsMap,
+    messages,
+    settings,
+    candidateVisits,
+    contactLocations,
+    locations,
+    lastOutreach,
+  ] =
     await Promise.all([
       listNotes(shop, contact.id),
       listActivities(shop, contact.id, 100),
@@ -81,9 +102,45 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       getBrevoStatus(shop),
       buildMergeVarsMap(shop, [contact]),
       listMessageLogs(shop, contact.id),
+      prisma.shopSettings.findUnique({
+        where: { shop },
+        select: { ianaTimezone: true },
+      }),
+      prisma.visit.findMany({
+        where: {
+          shop,
+          contactId: contact.id,
+          visitDate: { in: visitDateCandidates },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { locationId: true, visitDate: true },
+      }),
+      prisma.contactLocation.findMany({
+        where: { shop, contactId: contact.id },
+        orderBy: [{ ordersCount: "desc" }, { lastOrderAt: "desc" }],
+        select: { locationId: true, ordersCount: true },
+      }),
+      prisma.location.findMany({
+        where: { shop },
+        select: { legacyId: true, name: true },
+      }),
+      prisma.activity.findFirst({
+        where: {
+          shop,
+          contactId: contact.id,
+          type: { in: ["OUTREACH_CALL", "OUTREACH_IN_PERSON", "OUTREACH_TEXT"] },
+        },
+        orderBy: { occurredAt: "desc" },
+        select: { type: true, occurredAt: true },
+      }),
     ]);
 
   const numericId = contact.shopifyCustomerId.split("/").pop();
+  const locationNames = new Map(
+    locations.map((location) => [location.legacyId, location.name]),
+  );
+  const today = dateStringInTz(now, settings?.ianaTimezone ?? null);
+  const todayVisit = candidateVisits.find((visit) => visit.visitDate === today) ?? null;
 
   const insights = live
     ? computeInsights({
@@ -149,6 +206,19 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       body: t.body,
     })),
     brevoConnected: brevoStatus.connected,
+    todayVisit:
+      todayVisit
+        ? {
+            locationId: todayVisit.locationId,
+            locationName: locationNames.get(todayVisit.locationId) ?? "Unknown store",
+          }
+        : null,
+    shopsAt: contactLocations.map((row) => ({
+      locationId: row.locationId,
+      locationName: locationNames.get(row.locationId) ?? "Unknown store",
+      ordersCount: row.ordersCount,
+    })),
+    lastOutreach,
     previewVars: varsMap.get(contact.id) ?? {},
     shopifyCustomerUrl: `https://${shop}/admin/customers/${numericId}`,
     shop,
@@ -171,6 +241,13 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       case "addNote":
         await addNote(shop, contactId, String(form.get("body") ?? ""), staffId);
         return { ok: true, toast: "Note added." };
+      case "logOutreach":
+        await logOutreach(shop, contactId, {
+          type: String(form.get("type") ?? ""),
+          note: String(form.get("note") ?? ""),
+          staffId,
+        });
+        return { ok: true, toast: "Outreach logged." };
       case "editNote":
         await editNote(shop, String(form.get("noteId") ?? ""), String(form.get("body") ?? ""));
         return { ok: true, toast: "Note updated." };
@@ -266,6 +343,10 @@ function describeTimeline(item: {
       return String(p.subject ?? p.preview ?? "Message received");
     case "TASK":
       return `${p.title ?? "Task"} (${p.action ?? "updated"})`;
+    case "OUTREACH_CALL":
+    case "OUTREACH_IN_PERSON":
+    case "OUTREACH_TEXT":
+      return String(p.note ?? "Outreach logged");
     default:
       return "";
   }
@@ -294,6 +375,11 @@ const ACTIVITY_FILTERS: ReadonlyArray<{
     label: "Messages",
     types: ["EMAIL_SENT", "SMS_SENT", "EMAIL_RECEIVED", "SMS_RECEIVED"],
   },
+  {
+    id: "OUTREACH",
+    label: "Outreach",
+    types: ["OUTREACH_CALL", "OUTREACH_IN_PERSON", "OUTREACH_TEXT"],
+  },
   { id: "TASK", label: "Tasks", types: ["TASK"] },
   { id: "STAGE", label: "Stage", types: ["STAGE_CHANGED"] },
 ];
@@ -307,6 +393,68 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
         {sub ? <s-text color="subdued">{sub}</s-text> : null}
       </s-stack>
     </s-box>
+  );
+}
+
+type OutreachMethod = "OUTREACH_CALL" | "OUTREACH_IN_PERSON" | "OUTREACH_TEXT";
+
+function LogOutreachCard() {
+  const fetcher = useFetcher<{ ok: boolean; toast?: string }>();
+  const [method, setMethod] = useState<OutreachMethod>("OUTREACH_CALL");
+  const [note, setNote] = useState("");
+  const busy = fetcher.state !== "idle";
+  useActionToast(fetcher.data);
+
+  useEffect(() => {
+    if (fetcher.data?.ok) setNote("");
+  }, [fetcher.data]);
+
+  function submit() {
+    fetcher.submit(
+      { _action: "logOutreach", type: method, note: note.trim() },
+      { method: "post" },
+    );
+  }
+
+  return (
+    <s-section heading="Log outreach">
+      <s-stack direction="block" gap="base">
+        <s-select
+          label="Method"
+          value={method}
+          onChange={(event) => {
+            const value = (event.target as HTMLSelectElement | null)?.value;
+            if (
+              value === "OUTREACH_CALL" ||
+              value === "OUTREACH_IN_PERSON" ||
+              value === "OUTREACH_TEXT"
+            ) {
+              setMethod(value);
+            }
+          }}
+        >
+          <s-option value="OUTREACH_CALL">Call</s-option>
+          <s-option value="OUTREACH_IN_PERSON">In person</s-option>
+          <s-option value="OUTREACH_TEXT">Text</s-option>
+        </s-select>
+        <s-text-area
+          label="Note"
+          value={note}
+          rows={3}
+          placeholder="What did you discuss?"
+          onInput={(event) =>
+            setNote((event.target as HTMLTextAreaElement | null)?.value ?? "")
+          }
+        />
+        <s-button
+          variant="primary"
+          onClick={submit}
+          {...(busy ? { loading: true, disabled: true } : {})}
+        >
+          Log outreach
+        </s-button>
+      </s-stack>
+    </s-section>
   );
 }
 
@@ -405,6 +553,11 @@ export default function ContactDetail() {
                 <StageBadge stage={contact.stage} />
                 {live?.verifiedEmail ? <s-badge tone="success">Verified email</s-badge> : null}
                 {insights?.atRisk ? <s-badge tone="critical">At risk</s-badge> : null}
+                {data.todayVisit ? (
+                  <s-badge tone="success">
+                    Visited today - {data.todayVisit.locationName}
+                  </s-badge>
+                ) : null}
               </s-stack>
               <s-stack direction="inline" gap="base" justifyContent="center">
                 {contact.email ? (
@@ -485,6 +638,31 @@ export default function ContactDetail() {
               </s-paragraph>
             </s-banner>
           )}
+
+          <s-section heading="Store & outreach">
+            <s-stack direction="block" gap="base">
+              <s-stack direction="inline" gap="small-200" alignItems="center">
+                <s-text type="strong">Shops at</s-text>
+                {data.shopsAt.length > 0 ? (
+                  data.shopsAt.map((store) => (
+                    <s-badge key={store.locationId} tone="neutral">
+                      {store.locationName} ({store.ordersCount})
+                    </s-badge>
+                  ))
+                ) : (
+                  <s-text color="subdued">No attributed store purchases yet.</s-text>
+                )}
+              </s-stack>
+              <s-text>
+                <s-text type="strong">Last outreach: </s-text>
+                {data.lastOutreach && isActivityType(data.lastOutreach.type)
+                  ? `${ACTIVITY_TYPE_META[data.lastOutreach.type].label} · ${formatRelativeDay(
+                      data.lastOutreach.occurredAt,
+                    )}`
+                  : "None logged"}
+              </s-text>
+            </s-stack>
+          </s-section>
 
           {insights && insights.topProducts.length > 0 && (
             <s-section heading="Top products">
@@ -573,7 +751,10 @@ export default function ContactDetail() {
             </s-section>
           )}
 
-          <s-section heading="Send a message">
+          <LogOutreachCard />
+
+          {data.brevoConnected && (
+            <s-section heading="Send a message">
             {data.brevoConnected && !emailAllowed && !smsAllowed ? (
               <s-banner tone="warning">
                 <s-paragraph>
@@ -583,27 +764,19 @@ export default function ContactDetail() {
                 </s-paragraph>
               </s-banner>
             ) : null}
-            {data.brevoConnected ? (
-              <ComposeMessage
-                heading="Send a message"
-                // Consent gates the channel in the UI as well as on the server, so the merchant
-                // is never offered a send that would only be recorded as skipped.
-                canEmail={Boolean(contact.email) && emailAllowed}
-                canSms={Boolean(contact.phone) && smsAllowed}
-                previewVars={data.previewVars}
-                templates={data.templates}
-                actionValue="sendMessage"
-                submitLabel="Send message"
-              />
-            ) : (
-              <s-stack direction="block" gap="base">
-                <s-paragraph color="subdued">
-                  Connect Brevo in Settings to send email and SMS to this contact.
-                </s-paragraph>
-                <s-button href="/app/settings">Go to Settings</s-button>
-              </s-stack>
-            )}
-          </s-section>
+            <ComposeMessage
+              heading="Send a message"
+              // Consent gates the channel in the UI as well as on the server, so the merchant
+              // is never offered a send that would only be recorded as skipped.
+              canEmail={Boolean(contact.email) && emailAllowed}
+              canSms={Boolean(contact.phone) && smsAllowed}
+              previewVars={data.previewVars}
+              templates={data.templates}
+              actionValue="sendMessage"
+              submitLabel="Send message"
+            />
+            </s-section>
+          )}
         </>
       )}
 

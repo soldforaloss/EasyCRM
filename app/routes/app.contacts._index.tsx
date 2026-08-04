@@ -33,6 +33,7 @@ import { displayName, formatDate, formatMoney } from "../lib/format";
 import { StageBadge } from "../components/badges";
 import { ConfirmAction } from "../components/confirm";
 import { useActionToast } from "../lib/use-action-toast";
+import prisma from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -40,10 +41,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const params = parseContactListParams(url.searchParams);
 
-  const [list, tags, segments] = await Promise.all([
+  const [list, tags, segments, locations] = await Promise.all([
     listContacts(shop, params),
     listTags(shop),
     listSegments(shop),
+    prisma.location.findMany({
+      where: { shop },
+      orderBy: { name: "asc" },
+      select: { legacyId: true, name: true, isActive: true },
+    }),
   ]);
 
   return {
@@ -60,6 +66,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       amountSpent: c.amountSpent,
       currencyCode: c.currencyCode,
       lastOrderAt: c.lastOrderAt,
+      lastVisitLocationId: c.lastVisitLocationId,
     })),
     total: list.total,
     page: list.page,
@@ -67,6 +74,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     pageSize: list.pageSize,
     tags: tags.map((t) => ({ id: t.id, name: t.name, count: t._count.contacts })),
     segments: segments.map((s) => ({ id: s.id, name: s.name, criteria: s.criteria })),
+    locations,
+    locationNames: Object.fromEntries(
+      locations.map((location) => [location.legacyId, location.name]),
+    ),
   };
 };
 
@@ -112,6 +123,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           search: String(form.get("q") ?? ""),
           stages: form.getAll("stage").map(String) as never,
           tagIds: form.getAll("tag").map(String),
+          locationIds: form.getAll("location").map(String),
           spendTiers: form.getAll("spend").map(String),
         });
         return { ok: true, toast: `Saved segment “${name}”.` };
@@ -255,6 +267,25 @@ export default function ContactsList() {
               </s-stack>
             )}
 
+            {data.locations.length > 0 && (
+              <s-stack direction="block" gap="small-200">
+                <s-text type="strong">Store</s-text>
+                <s-stack direction="inline" gap="base">
+                  {data.locations.map((location) => (
+                    <s-checkbox
+                      key={location.legacyId}
+                      name="location"
+                      value={location.legacyId}
+                      label={`${location.name}${location.isActive ? "" : " (inactive)"}`}
+                      {...(params.locationIds?.includes(location.legacyId)
+                        ? { checked: true }
+                        : {})}
+                    />
+                  ))}
+                </s-stack>
+              </s-stack>
+            )}
+
             {/* keep current sort when applying filters */}
             <input type="hidden" name="sort" value={params.sortField} />
             <input type="hidden" name="dir" value={params.sortDir} />
@@ -282,6 +313,9 @@ export default function ContactsList() {
             ))}
             {(params.tagIds ?? []).map((t) => (
               <input key={t} type="hidden" name="tag" value={t} />
+            ))}
+            {(params.locationIds ?? []).map((locationId) => (
+              <input key={locationId} type="hidden" name="location" value={locationId} />
             ))}
             {(params.spendTiers ?? []).map((s) => (
               <input key={s} type="hidden" name="spend" value={s} />
@@ -366,6 +400,7 @@ export default function ContactsList() {
                   </s-link>
                 </s-table-header>
                 <s-table-header>Tags</s-table-header>
+                <s-table-header>Last store</s-table-header>
                 <s-table-header>
                   <s-link href={sortHref("ordersCount")}>
                     Orders{sortIndicator("ordersCount")}
@@ -402,6 +437,11 @@ export default function ContactsList() {
                     </s-table-cell>
                     <s-table-cell>
                       {r.tags.length > 0 ? r.tags.slice(0, 3).join(", ") : "—"}
+                    </s-table-cell>
+                    <s-table-cell>
+                      {r.lastVisitLocationId
+                        ? data.locationNames[r.lastVisitLocationId] ?? "Unknown store"
+                        : "—"}
                     </s-table-cell>
                     <s-table-cell>{r.ordersCount}</s-table-cell>
                     <s-table-cell>{formatMoney(r.amountSpent, r.currencyCode)}</s-table-cell>
@@ -476,12 +516,14 @@ function filterCriteriaToSearch(criteria: string): string {
       search?: string;
       stages?: string[];
       tagIds?: string[];
+      locationIds?: string[];
       spendTiers?: string[];
     };
     const sp = new URLSearchParams();
     if (f.search) sp.set("q", f.search);
     for (const s of f.stages ?? []) sp.append("stage", s);
     for (const t of f.tagIds ?? []) sp.append("tag", t);
+    for (const locationId of f.locationIds ?? []) sp.append("location", locationId);
     for (const s of f.spendTiers ?? []) sp.append("spend", s);
     return sp.toString();
   } catch {

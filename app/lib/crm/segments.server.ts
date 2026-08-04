@@ -21,10 +21,11 @@ export function parseSegmentCriteria(criteria: string): ContactFilter {
       search: typeof parsed.search === "string" ? parsed.search : "",
       stages: Array.isArray(parsed.stages) ? parsed.stages : [],
       tagIds: Array.isArray(parsed.tagIds) ? parsed.tagIds : [],
+      locationIds: Array.isArray(parsed.locationIds) ? parsed.locationIds : [],
       spendTiers: Array.isArray(parsed.spendTiers) ? parsed.spendTiers : [],
     };
   } catch {
-    return { search: "", stages: [], tagIds: [], spendTiers: [] };
+    return { search: "", stages: [], tagIds: [], locationIds: [], spendTiers: [] };
   }
 }
 

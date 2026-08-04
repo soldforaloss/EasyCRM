@@ -96,6 +96,9 @@ export const ACTIVITY_TYPES = [
   "ORDER_PLACED",
   "STAGE_CHANGED",
   "TASK",
+  "OUTREACH_CALL",
+  "OUTREACH_IN_PERSON",
+  "OUTREACH_TEXT",
   "SYSTEM",
 ] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
@@ -116,6 +119,9 @@ export const ACTIVITY_TYPE_META: Record<
   ORDER_PLACED: { label: "Order placed", icon: "cart" },
   STAGE_CHANGED: { label: "Stage changed", icon: "flag" },
   TASK: { label: "Task", icon: "calendar" },
+  OUTREACH_CALL: { label: "Call logged", icon: "chat" },
+  OUTREACH_IN_PERSON: { label: "In-person conversation", icon: "person" },
+  OUTREACH_TEXT: { label: "Text logged", icon: "chat" },
   SYSTEM: { label: "System", icon: "info" },
 };
 

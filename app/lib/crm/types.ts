@@ -29,6 +29,8 @@ export interface ContactFilter {
   search?: string;
   stages?: LifecycleStage[];
   tagIds?: string[];
+  /** Shopify location legacy ids represented by ContactLocation rollups. */
+  locationIds?: string[];
   /** SpendTier ids (see constants.SPEND_TIERS). */
   spendTiers?: string[];
 }
@@ -43,7 +45,7 @@ export interface ContactListParams extends ContactFilter {
 export const DEFAULT_PAGE_SIZE = 25;
 
 export function emptyContactFilter(): ContactFilter {
-  return { search: "", stages: [], tagIds: [], spendTiers: [] };
+  return { search: "", stages: [], tagIds: [], locationIds: [], spendTiers: [] };
 }
 
 /* ------------------------------------------------------------------ */

@@ -22,8 +22,14 @@ import { ConfirmAction } from "../components/confirm";
 import { useActionToast } from "../lib/use-action-toast";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
-  const tasks = await listTasks(session.shop);
+  const { session, sessionToken } = await authenticate.admin(request);
+  const staffId = staffIdFromSessionToken(sessionToken);
+  const requestedView = new URL(request.url).searchParams.get("view");
+  const view = staffId && requestedView !== "all" ? "my" : "all";
+  const tasks = await listTasks(
+    session.shop,
+    view === "my" && staffId ? { assigneeStaffId: staffId } : {},
+  );
   const groups = groupTasks(tasks);
   const toView = (t: TaskWithContact) => ({
     id: t.id,
@@ -37,6 +43,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       : null,
   });
   return {
+    view,
+    staffAvailable: Boolean(staffId),
     overdue: groups.overdue.map(toView),
     today: groups.today.map(toView),
     upcoming: groups.upcoming.map(toView),
@@ -188,6 +196,29 @@ export default function TasksPage() {
 
   return (
     <s-page heading="Tasks">
+      <s-section>
+        <s-stack direction="inline" gap="small-200" alignItems="center">
+          <s-button
+            href="/app/tasks?view=my"
+            variant={data.view === "my" ? "primary" : "tertiary"}
+            {...(data.staffAvailable ? {} : { disabled: true })}
+          >
+            My tasks
+          </s-button>
+          <s-button
+            href="/app/tasks?view=all"
+            variant={data.view === "all" ? "primary" : "tertiary"}
+          >
+            All tasks
+          </s-button>
+          {!data.staffAvailable && (
+            <s-text color="subdued">
+              Staff identity is unavailable here, so all tasks are shown.
+            </s-text>
+          )}
+        </s-stack>
+      </s-section>
+
       <s-section heading="New task">
         <s-stack direction="block" gap="base">
           <s-stack direction="inline" gap="base" alignItems="end">

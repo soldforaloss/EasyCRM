@@ -351,3 +351,26 @@ broader `read_products` scope. `read_all_orders` remains intentionally omitted.
 Manual order resync is bounded to one queued backfill per shop per UTC hour. Running jobs renew a
 worker-owned lease, and completion/failure updates require that same owner; the sequential worker
 claims one job at a time so unstarted work cannot age into the stale-job recovery window.
+
+## 19. In-store staff surfaces
+
+`/app/today` is a store-scoped operating view, not a general order report. It shows the current
+shop-local calendar day's inferred Visits for one active location, newest POS order first. A row
+exists only when Shopify attached a customer to a POS sale at that location; walk-ins and guest
+checkouts remain invisible under the Visit semantics in §18.
+
+The default store is persisted per embedded Shopify staff member in `StaffProfile.homeLocationId`.
+A `?location=<legacyId>` query value overrides that default for the current request, while changing
+the selector persists the next default when a verified session-token staff id is available. Outside
+embedded contexts the staff id may be absent, so the view asks for an explicit store selection and
+continues without persisting it rather than failing.
+
+Manual call, in-person and text outreach is recorded as append-only Activity rows. This path does
+not use `MessageLog`, Brevo, or `sendOneToContact`: it records a conversation that already happened
+and does not send anything to the customer. The marketing-consent gate in §10 therefore remains
+mandatory for wire sends but deliberately does not block manual outreach logging.
+
+The Tasks page defaults to **My tasks** when an embedded session token identifies the current staff
+member and filters by `Task.assigneeStaffId`; staff can switch to **All tasks** explicitly. When no
+staff identity is available, **All tasks** is the safe, usable default because filtering on a null
+identity would hide work rather than identify its owner.
