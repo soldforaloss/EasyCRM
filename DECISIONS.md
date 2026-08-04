@@ -389,3 +389,49 @@ prefer the later observation because orders are processed oldest-first, making r
 behavior the useful tiebreaker. A `MANUAL` row always outranks `DERIVED` for display without deleting
 the evidence-backed value; clearing the override immediately reveals the current derivation again.
 Manual values remain app-owned and require no Shopify customer-write scope.
+
+## 21. Dependency audit: non-breaking remediation only
+
+The 2026-08-04 audit started with 17 distinct advisories affecting 34 package entries
+(32 high, one moderate and one low). `npm audit fix` was run without `--force`, then two
+same-major overrides cleared vulnerable transitive pins: lodash 4.18.1 under GraphQL Codegen and
+minimatch 9.0.9 in place of the exact 9.0.3 pin under TypeScript ESLint. The result is 16 advisory
+IDs fixed and one deferred, with six affected package entries remaining. No major dependency was
+changed.
+
+| Package | Severity | Disposition | Detail |
+| --- | --- | --- | --- |
+| `@graphql-codegen/add` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/cli` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/client-preset` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/core` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/gql-tag-operations` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/introspection` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/plugin-helpers` | High | Fixed | Its vulnerable lodash 4.17.23 pin now resolves to 4.18.1. |
+| `@graphql-codegen/schema-ast` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/typed-document-node` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/typescript` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/typescript-operations` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@graphql-codegen/visitor-plugin-common` | High | Fixed | Cleared with the lodash 4.18.1 transitive override. |
+| `@shopify/api-codegen-preset` | High | Fixed | Its GraphQL Codegen advisory chain cleared without the available 2.x major upgrade. |
+| `@shopify/graphql-codegen` | High | Fixed | Its GraphQL Codegen advisory chain cleared without a major upgrade. |
+| `@typescript-eslint/eslint-plugin` | High | Fixed | Cleared by replacing transitive minimatch 9.0.3 with 9.0.9. |
+| `@typescript-eslint/parser` | High | Fixed | Cleared by replacing transitive minimatch 9.0.3 with 9.0.9. |
+| `@typescript-eslint/type-utils` | High | Fixed | Cleared by replacing transitive minimatch 9.0.3 with 9.0.9. |
+| `@typescript-eslint/typescript-estree` | High | Fixed | Its exact minimatch 9.0.3 pin is overridden to the same-major 9.0.9 patch. |
+| `@typescript-eslint/utils` | High | Fixed | Cleared by replacing transitive minimatch 9.0.3 with 9.0.9. |
+| `body-parser` | Low | Fixed | `npm audit fix` updated 1.20.5 to 1.20.6. |
+| `brace-expansion` | High | Fixed | `npm audit fix` updated vulnerable 1.x, 2.x and 5.x instances within their majors. |
+| `immutable` | High | Fixed | `npm audit fix` updated 5.1.6 to 5.1.9. |
+| `js-yaml` | High | Fixed | `npm audit fix` updated 4.2.0 to 4.3.1. |
+| `lodash` | High | Fixed | GraphQL Codegen's 4.17.23 instance is overridden to same-major 4.18.1. |
+| `minimatch` | High | Fixed | TypeScript ESLint's 9.0.3 instance is overridden to same-major 9.0.9. |
+| `postcss` | High | Fixed | `npm audit fix` updated 8.5.15 to 8.5.25. |
+| `shell-quote` | High | Fixed | `npm audit fix` updated 1.8.4 to 1.10.0. |
+| `valibot` | Moderate | Fixed | `npm audit fix` updated 1.4.1 to 1.4.2. |
+| `react-router` | High | Deferred | The CSRF advisory is only fixed by React Router 8.3.0; a major migration is out of scope. |
+| `@react-router/dev` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
+| `@react-router/express` | High | Deferred | Transitive exposure follows React Router; remediation requires the 8.3.0 major line. |
+| `@react-router/fs-routes` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
+| `@react-router/node` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
+| `@react-router/serve` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |

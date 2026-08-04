@@ -29,12 +29,97 @@ beforeEach(() => {
 });
 
 describe("assembleCustomerData", () => {
-  it("exports customer-relevant order fields without POS staff or persistence identifiers", async () => {
-    await assembleCustomerData("shop.myshopify.com", "gid://shopify/Customer/1");
+  it("exports customer-facing fields without staff or persistence identifiers", async () => {
+    const createdAt = new Date("2026-08-04T12:00:00.000Z");
+    prismaMock.contact.findFirst.mockResolvedValue({
+      shopifyCustomerId: "gid://shopify/Customer/1",
+      firstName: "Ada",
+      lastName: "Lovelace",
+      email: "ada@example.com",
+      phone: "+15551234567",
+      emailMarketingState: "SUBSCRIBED",
+      smsMarketingState: "NOT_SUBSCRIBED",
+      amountSpent: 120,
+      currencyCode: "USD",
+      ordersCount: 2,
+      lastOrderAt: createdAt,
+      lastVisitAt: createdAt,
+      lastVisitLocationId: "101",
+      lifecycleStage: "VIP",
+      source: "POS",
+      createdAt,
+      updatedAt: createdAt,
+      tags: [{ createdAt, tag: { name: "VIP" } }],
+      notes: [{ body: "Prefers text", createdAt, updatedAt: createdAt }],
+      activities: [{ type: "ORDER_PLACED", occurredAt: createdAt, createdAt }],
+      messageLogs: [
+        {
+          channel: "SMS",
+          direction: "OUTBOUND",
+          subject: null,
+          bodySnapshot: "Your order is ready",
+          status: "SENT",
+          skipReason: null,
+          createdAt,
+        },
+      ],
+      tasks: [
+        {
+          title: "Follow up",
+          notes: "Ask about sizing",
+          dueAt: createdAt,
+          status: "OPEN",
+          createdAt,
+          updatedAt: createdAt,
+        },
+      ],
+      processedOrders: [
+        {
+          orderGid: "gid://shopify/Order/10",
+          orderName: "#10",
+          total: "120.00",
+          currencyCode: "USD",
+          occurredAt: createdAt,
+          sourceName: "pos",
+          locationId: "101",
+          lineItems: '[{"title":"Sneaker"}]',
+          createdAt,
+        },
+      ],
+      visits: [
+        {
+          locationId: "101",
+          visitDate: "2026-08-04",
+          source: "POS_ORDER",
+          orderGid: "gid://shopify/Order/10",
+          createdAt,
+        },
+      ],
+      contactLocations: [{ locationId: "101", ordersCount: 2, lastOrderAt: createdAt }],
+      preferences: [
+        { key: "SHOE_SIZE", value: "10", source: "DERIVED", sampleCount: 2, updatedAt: createdAt },
+      ],
+    });
 
-    const processedOrders = prismaMock.contact.findFirst.mock.calls[0][0].include.processedOrders;
-    expect(prismaMock.contact.findFirst.mock.calls[0][0].include.preferences).toBe(true);
-    expect(processedOrders.select).toMatchObject({
+    const exported = await assembleCustomerData(
+      "shop.myshopify.com",
+      "gid://shopify/Customer/1",
+    );
+
+    const selected = prismaMock.contact.findFirst.mock.calls[0][0].select;
+    expect(selected).not.toHaveProperty("id");
+    expect(selected).not.toHaveProperty("shop");
+    expect(selected).not.toHaveProperty("ownerStaffId");
+    expect(selected.notes.select).toEqual({ body: true, createdAt: true, updatedAt: true });
+    expect(selected.tasks.select).toMatchObject({ title: true, notes: true, status: true });
+    expect(selected.messageLogs.select).toMatchObject({
+      channel: true,
+      direction: true,
+      subject: true,
+      bodySnapshot: true,
+      status: true,
+    });
+    expect(selected.processedOrders.select).toMatchObject({
       orderGid: true,
       orderName: true,
       total: true,
@@ -43,12 +128,36 @@ describe("assembleCustomerData", () => {
       sourceName: true,
       locationId: true,
       lineItems: true,
-      createdAt: true,
     });
-    expect(processedOrders.select).not.toHaveProperty("posUserId");
-    expect(processedOrders.select).not.toHaveProperty("posDeviceId");
-    expect(processedOrders.select).not.toHaveProperty("contactId");
-    expect(processedOrders.select).not.toHaveProperty("shop");
+    expect(selected.visits.select).toMatchObject({ locationId: true, visitDate: true });
+    expect(selected.contactLocations.select).toMatchObject({
+      locationId: true,
+      ordersCount: true,
+      lastOrderAt: true,
+    });
+    expect(selected.preferences.select).toMatchObject({
+      key: true,
+      value: true,
+      source: true,
+      sampleCount: true,
+    });
+
+    const selectedKeyNames = JSON.stringify(selected).match(/"([^"]+)":/g) ?? [];
+    expect(selectedKeyNames.filter((key) => /StaffId":$/.test(key))).toEqual([]);
+    const keyNames = JSON.stringify(exported).match(/"([^"]+)":/g) ?? [];
+    expect(keyNames.filter((key) => /StaffId":$/.test(key))).toEqual([]);
+    expect(exported.data).toMatchObject({
+      firstName: "Ada",
+      tags: [{ tag: { name: "VIP" } }],
+      notes: [{ body: "Prefers text" }],
+      activities: [{ type: "ORDER_PLACED" }],
+      messageLogs: [{ channel: "SMS", bodySnapshot: "Your order is ready", status: "SENT" }],
+      tasks: [{ title: "Follow up", status: "OPEN" }],
+      processedOrders: [{ orderName: "#10", total: "120.00", locationId: "101" }],
+      visits: [{ locationId: "101", visitDate: "2026-08-04" }],
+      contactLocations: [{ locationId: "101", ordersCount: 2 }],
+      preferences: [{ key: "SHOE_SIZE", value: "10", source: "DERIVED" }],
+    });
   });
 });
 

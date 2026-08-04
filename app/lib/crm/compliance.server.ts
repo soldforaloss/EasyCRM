@@ -26,12 +26,65 @@ export function customerGidFromCompliancePayload(p: CompliancePayload): string |
 export async function assembleCustomerData(shop: string, customerGid: string) {
   const contact = await prisma.contact.findFirst({
     where: { shop, shopifyCustomerId: customerGid },
-    include: {
-      tags: { include: { tag: true } },
-      notes: true,
-      activities: true,
-      messageLogs: true,
-      tasks: true,
+    select: {
+      shopifyCustomerId: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      phone: true,
+      emailMarketingState: true,
+      smsMarketingState: true,
+      amountSpent: true,
+      currencyCode: true,
+      ordersCount: true,
+      lastOrderAt: true,
+      lastVisitAt: true,
+      lastVisitLocationId: true,
+      lifecycleStage: true,
+      source: true,
+      createdAt: true,
+      updatedAt: true,
+      tags: {
+        select: {
+          createdAt: true,
+          tag: { select: { name: true } },
+        },
+      },
+      notes: {
+        select: {
+          body: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+      activities: {
+        select: {
+          type: true,
+          occurredAt: true,
+          createdAt: true,
+        },
+      },
+      messageLogs: {
+        select: {
+          channel: true,
+          direction: true,
+          subject: true,
+          bodySnapshot: true,
+          status: true,
+          skipReason: true,
+          createdAt: true,
+        },
+      },
+      tasks: {
+        select: {
+          title: true,
+          notes: true,
+          dueAt: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
       processedOrders: {
         select: {
           orderGid: true,
@@ -45,9 +98,31 @@ export async function assembleCustomerData(shop: string, customerGid: string) {
           createdAt: true,
         },
       },
-      visits: true,
-      contactLocations: true,
-      preferences: true,
+      visits: {
+        select: {
+          locationId: true,
+          visitDate: true,
+          source: true,
+          orderGid: true,
+          createdAt: true,
+        },
+      },
+      contactLocations: {
+        select: {
+          locationId: true,
+          ordersCount: true,
+          lastOrderAt: true,
+        },
+      },
+      preferences: {
+        select: {
+          key: true,
+          value: true,
+          source: true,
+          sampleCount: true,
+          updatedAt: true,
+        },
+      },
     },
   });
   return {
