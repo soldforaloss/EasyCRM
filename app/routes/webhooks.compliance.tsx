@@ -1,12 +1,13 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import {
-  assembleCustomerData,
   customerGidFromCompliancePayload,
+  recordDataRequest,
   redactCustomer,
   redactShop,
   type CompliancePayload,
 } from "../lib/crm/compliance.server";
+import { logger } from "../lib/logger.server";
 
 /**
  * Single endpoint for the three mandatory privacy/compliance topics (declared via
@@ -16,28 +17,30 @@ import {
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { shop, topic, payload } = await authenticate.webhook(request);
   const body = payload as CompliancePayload;
-  console.log(`Received compliance webhook ${topic} for ${shop}`);
+  logger.info("compliance.received", { shop, topic });
 
   switch (topic) {
     case "CUSTOMERS_DATA_REQUEST": {
       const gid = customerGidFromCompliancePayload(body);
       if (gid) {
-        const data = await assembleCustomerData(shop, gid);
-        // No Shopify callback exists for data requests — the merchant must deliver this to the
-        // customer. We assemble it here; production should email/store it for the merchant.
-        console.log(
-          `[compliance] data_request for ${gid} on ${shop}: ${data.found ? "data assembled" : "no CRM data stored"}`,
-        );
+        // Persist the export so the merchant can actually deliver it — Shopify offers no
+        // callback for data requests. Surfaced at /app/privacy. See DECISIONS.md §14.
+        const id = await recordDataRequest(shop, gid, body.customer?.email ?? null);
+        logger.info("compliance.data_request_stored", { shop, customerGid: gid, requestId: id });
       }
       return new Response();
     }
     case "CUSTOMERS_REDACT": {
       const gid = customerGidFromCompliancePayload(body);
-      if (gid) await redactCustomer(shop, gid);
+      if (gid) {
+        await redactCustomer(shop, gid);
+        logger.info("compliance.customer_redacted", { shop, customerGid: gid });
+      }
       return new Response();
     }
     case "SHOP_REDACT": {
       await redactShop(shop);
+      logger.info("compliance.shop_redacted", { shop });
       return new Response();
     }
     default:

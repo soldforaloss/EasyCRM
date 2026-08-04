@@ -7,6 +7,7 @@ const { prismaMock } = vi.hoisted(() => ({
       upsert: vi.fn(),
       deleteMany: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     activity: {
       create: vi.fn(),
@@ -19,11 +20,16 @@ const { prismaMock } = vi.hoisted(() => ({
 vi.mock("../../db.server", () => ({ default: prismaMock }));
 
 // Avoid pulling the Shopify GraphQL module's transitive deps into the test.
-vi.mock("../shopify/customers.server", () => ({ iterateCustomers: vi.fn() }));
+const { syncFieldsMock } = vi.hoisted(() => ({ syncFieldsMock: vi.fn() }));
+vi.mock("../shopify/customers.server", () => ({
+  iterateCustomers: vi.fn(),
+  fetchCustomerSyncFields: syncFieldsMock,
+}));
 
 import {
   deleteContactFromWebhook,
   recordOrderFromWebhook,
+  refreshContactFromShopify,
   upsertContactFromWebhook,
 } from "./mirror.server";
 
@@ -149,5 +155,51 @@ describe("recordOrderFromWebhook", () => {
   it("skips guest checkouts (no customer)", async () => {
     await recordOrderFromWebhook("s", { id: 7, total_price: "10.00", customer: null });
     expect(prismaMock.contact.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("refreshContactFromShopify (consent)", () => {
+  const admin = { graphql: vi.fn() };
+
+  it("writes the current marketing states onto the mirror", async () => {
+    syncFieldsMock.mockResolvedValue({
+      amountSpent: 250,
+      currencyCode: "USD",
+      numberOfOrders: 3,
+      lastOrderAt: "2026-01-01T00:00:00Z",
+      emailMarketingState: "SUBSCRIBED",
+      smsMarketingState: "NOT_SUBSCRIBED",
+    });
+
+    await refreshContactFromShopify(admin, "s", "gid://shopify/Customer/1");
+
+    const data = prismaMock.contact.updateMany.mock.calls[0][0].data;
+    expect(data.emailMarketingState).toBe("SUBSCRIBED");
+    expect(data.smsMarketingState).toBe("NOT_SUBSCRIBED");
+  });
+
+  it("clears consent back to null when the customer opts out", async () => {
+    // Consent must be written unconditionally: if an opt-out were spread-guarded away, a
+    // previously-granted consent would persist forever and we would keep messaging them.
+    syncFieldsMock.mockResolvedValue({
+      amountSpent: 0,
+      currencyCode: null,
+      numberOfOrders: 0,
+      lastOrderAt: null,
+      emailMarketingState: null,
+      smsMarketingState: null,
+    });
+
+    await refreshContactFromShopify(admin, "s", "gid://shopify/Customer/1");
+
+    const data = prismaMock.contact.updateMany.mock.calls[0][0].data;
+    expect(data).toHaveProperty("emailMarketingState", null);
+    expect(data).toHaveProperty("smsMarketingState", null);
+  });
+
+  it("leaves the mirror untouched when the live read fails", async () => {
+    syncFieldsMock.mockRejectedValue(new Error("rate limited"));
+    await refreshContactFromShopify(admin, "s", "gid://shopify/Customer/1");
+    expect(prismaMock.contact.updateMany).not.toHaveBeenCalled();
   });
 });

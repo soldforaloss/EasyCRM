@@ -6,7 +6,8 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
-import { backfillContacts } from "./lib/crm/mirror.server";
+import { enqueueJob } from "./lib/jobs/queue.server";
+import { logger, reportError } from "./lib/logger.server";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -25,22 +26,29 @@ const shopify = shopifyApp({
       // App-specific webhooks (including the mandatory compliance topics) are declared in
       // shopify.app.toml, so no manual registration is needed here.
       //
-      // One-time install backfill: mirror existing Shopify customers when the local mirror is
-      // empty for this shop. Guarded so reauthentication doesn't re-run it. For very large
-      // catalogs, production should move this to a background job (see DECISIONS.md §8).
+      // One-time install backfill. This ENQUEUES rather than running inline: a shop with tens of
+      // thousands of customers would otherwise hold the OAuth callback open until the platform
+      // timed it out, failing the install. The dedupe key makes re-authentication a no-op.
+      // See DECISIONS.md §11.
       try {
         const existing = await prisma.contact.count({ where: { shop: session.shop } });
         if (existing === 0) {
-          const { admin } = await shopify.unauthenticated.admin(session.shop);
-          const result = await backfillContacts(admin, session.shop);
-          console.log(
-            `Backfilled ${result.processed} customers for ${session.shop} (${result.pages} pages).`,
-          );
+          const job = await enqueueJob({
+            shop: session.shop,
+            type: "BACKFILL_CUSTOMERS",
+            payload: {},
+            dedupeKey: "backfill:initial",
+            maxAttempts: 5,
+          });
+          logger.info("install.backfill_enqueued", {
+            shop: session.shop,
+            enqueued: Boolean(job),
+          });
         }
       } catch (error) {
-        // Never block install on backfill failure — the manual "Sync from Shopify" action and
-        // ongoing customer webhooks will reconcile the mirror.
-        console.error(`Customer backfill failed for ${session.shop}:`, error);
+        // Never block install on this — the manual "Sync from Shopify" action and the ongoing
+        // customer webhooks will reconcile the mirror either way.
+        void reportError("install.backfill_enqueue_failed", error, { shop: session.shop });
       }
     },
   },

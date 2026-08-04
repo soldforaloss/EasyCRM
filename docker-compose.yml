@@ -1,0 +1,27 @@
+# Local development dependencies. The app itself runs via `shopify app dev` (which needs the
+# Shopify CLI's tunnel), so only the database lives here.
+#
+#   docker compose up -d db
+#   npx prisma migrate dev
+#
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: easycrm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: easycrm
+      POSTGRES_PASSWORD: easycrm
+      POSTGRES_DB: easycrm
+    ports:
+      - "5432:5432"
+    volumes:
+      - easycrm-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U easycrm -d easycrm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  easycrm-pgdata:

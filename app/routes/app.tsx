@@ -22,6 +22,7 @@ export default function App() {
         <s-link href="/app/contacts">Contacts</s-link>
         <s-link href="/app/tasks">Tasks</s-link>
         <s-link href="/app/templates">Templates</s-link>
+        <s-link href="/app/privacy">Privacy</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />

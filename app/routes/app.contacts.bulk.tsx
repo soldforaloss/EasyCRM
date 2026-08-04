@@ -16,10 +16,12 @@ import {
   getSegment,
   parseSegmentCriteria,
 } from "../lib/crm/segments.server";
-import { buildMergeVarsMap, sendBulk } from "../lib/crm/messaging.server";
+import { buildMergeVarsMap } from "../lib/crm/messaging.server";
+import { createBulkSend } from "../lib/crm/bulk.server";
 import { listTemplates } from "../lib/crm/templates.server";
 import { getBrevoStatus } from "../lib/crm/settings.server";
 import { isChannel } from "../lib/crm/constants";
+import { staffIdFromSessionToken } from "../lib/staff.server";
 import type { ContactListParams } from "../lib/crm/types";
 import { ComposeMessage } from "../components/compose";
 
@@ -86,7 +88,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, sessionToken } = await authenticate.admin(request);
   const shop = session.shop;
   const form = await request.formData();
   if (String(form.get("_action")) !== "sendBulk") {
@@ -95,25 +97,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const channel = String(form.get("channel") ?? "");
   if (!isChannel(channel)) return { ok: false, toast: "Choose a channel." };
 
+  const body = String(form.get("body") ?? "").trim();
+  if (!body) return { ok: false, toast: "Write a message before sending." };
+
   const ids = form.getAll("id").map(String);
   const segmentId = form.get("segment") ? String(form.get("segment")) : null;
-  const { contactIds } = await resolveRecipients(shop, ids, segmentId);
-  if (contactIds.length === 0) return { ok: false, toast: "No recipients to message." };
+  const { contactIds, label } = await resolveRecipients(shop, ids, segmentId);
 
+  // Queue the send and return immediately. The request never talks to Brevo — a large batch
+  // would otherwise exceed the platform request timeout mid-send. See DECISIONS.md §11.
   try {
-    const result = await sendBulk(shop, {
-      contactIds,
+    const result = await createBulkSend({
+      shop,
       channel,
       subject: String(form.get("subject") ?? ""),
-      body: String(form.get("body") ?? ""),
+      body,
+      contactIds,
+      createdByStaffId: staffIdFromSessionToken(sessionToken),
+      label,
     });
-    if (!result.ok) return { ok: false, toast: result.error ?? "Bulk send failed." };
+    if (!result.ok || !result.batch) {
+      return { ok: false, toast: result.error ?? "Bulk send could not be queued." };
+    }
+    const total = result.batch.total;
     return {
       ok: true,
-      toast: `Sent ${result.sent}, failed ${result.failed}, skipped ${result.skipped} of ${result.total}.`,
+      batchId: result.batch.id,
+      toast: `Queued ${total} message${total === 1 ? "" : "s"}. Recipients who aren't subscribed will be skipped automatically.`,
     };
   } catch (error) {
-    return { ok: false, toast: error instanceof Error ? error.message : "Bulk send failed." };
+    return {
+      ok: false,
+      toast: error instanceof Error ? error.message : "Bulk send could not be queued.",
+    };
   }
 };
 
@@ -136,6 +152,17 @@ export default function BulkCompose() {
             <s-text type="strong">Messaging: </s-text>
             {data.label}
           </s-text>
+          <s-text color="subdued">
+            <s-text type="strong">{data.counts.emailReachable}</s-text> can receive email ·{" "}
+            <s-text type="strong">{data.counts.smsReachable}</s-text> can receive SMS.
+          </s-text>
+          {data.counts.emailNoConsent > 0 || data.counts.smsNoConsent > 0 ? (
+            <s-text color="subdued">
+              Not subscribed to marketing and therefore skipped:{" "}
+              {data.counts.emailNoConsent} for email, {data.counts.smsNoConsent} for SMS. Easy CRM
+              only messages customers who opted in through Shopify.
+            </s-text>
+          ) : null}
           <s-text color="subdued">
             {data.counts.withEmail} have an email address · {data.counts.withValidPhone} have a
             valid mobile number. Recipients missing the chosen channel are skipped and reported.

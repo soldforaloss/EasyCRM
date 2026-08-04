@@ -1,23 +1,24 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 //
-// PORTABILITY CONTRACT (see DECISIONS.md §2):
-//   - Dev datasource is SQLite; production swaps `provider` + `DATABASE_URL` (Postgres/MySQL).
-//   - No native `enum` types (unsupported on SQLite) — "enum" fields are String + a TS union
-//     defined in app/lib/crm/constants.ts. Allowed values are documented at each field.
+// DATASOURCE (see DECISIONS.md §2):
+//   - PostgreSQL is the only supported datasource, for dev and production alike. The migration
+//     history is Postgres-dialect SQL and is NOT portable to SQLite/MySQL — do not switch the
+//     provider without regenerating `prisma/migrations/` from scratch.
+//   - Local dev uses a Postgres container (see README "Local setup").
+//
+// CONVENTIONS:
+//   - No native `enum` types — "enum" fields are String + a TS union defined in
+//     app/lib/crm/constants.ts. Allowed values are documented at each field.
 //   - JSON columns are String (store JSON.stringify) — see Activity.payload, Segment.criteria.
-//   - Money is a decimal String + currencyCode — never Decimal/Float.
-//   - No connector-specific native types (@db.Text etc.) while the SQLite provider is active.
+//   - `String` maps to Postgres `text` (unbounded), so long note/message bodies are safe.
 
 generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -59,6 +60,13 @@ model Contact {
   lastName  String?
   email     String?
   phone     String?
+
+  // Marketing consent, mirrored from Shopify and ENFORCED at send time (see DECISIONS.md §10).
+  // Values are Shopify's CustomerEmailMarketingState / CustomerSmsMarketingState:
+  //   SUBSCRIBED | NOT_SUBSCRIBED | PENDING | UNSUBSCRIBED | REDACTED | INVALID
+  // NULL means "never synced" and is treated as NOT consented — fail closed.
+  emailMarketingState String?
+  smsMarketingState   String?
 
   // Lightweight cached spend signals (see DECISIONS.md §3) — for list filter/sort only.
   // `amountSpent` is a non-authoritative Float cache key so the list can sort/filter spend
@@ -202,7 +210,12 @@ model MessageLog {
   templateId        String?
   subject           String?
   bodySnapshot      String
-  status            String   @default("QUEUED") // QUEUED | SENT | FAILED (outbound only; ignored for inbound)
+  status            String   @default("QUEUED") // QUEUED | SENT | FAILED | SKIPPED (outbound only; ignored for inbound)
+  /// Reason a send was suppressed without being attempted (status = SKIPPED). One of
+  /// SkipReason in constants.ts: NO_CONSENT | NO_ADDRESS | INVALID_PHONE.
+  skipReason        String?
+  /// Set when this row belongs to a bulk send, so progress can be aggregated per batch.
+  batchId           String?
   providerMessageId String? // Brevo id for OUR outbound send
   // Brevo Conversations per-message id for INBOUND dedup. Null for outbound rows; engines treat
   // NULLs as distinct in unique indexes, so many outbound NULLs coexist (DECISIONS.md §2).
@@ -213,10 +226,73 @@ model MessageLog {
 
   contact  Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
   template MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  batch    MessageBatch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([shop, providerEventId])
+  /// One row per (batch, contact) — the idempotency guard that makes a retried bulk-send job
+  /// unable to double-send. NULLs are distinct, so non-bulk rows are unconstrained.
+  @@unique([batchId, contactId])
   @@index([shop, contactId])
   @@index([shop, createdAt])
+  @@index([batchId])
+}
+
+/// A bulk send. Recipients are fanned out into one Job per contact; this row aggregates progress
+/// so the UI can poll a single record. See DECISIONS.md §11.
+model MessageBatch {
+  id               String   @id @default(cuid())
+  shop             String
+  channel          String // EMAIL | SMS
+  subject          String?
+  body             String
+  templateId       String?
+  createdByStaffId String?
+  /// Human label for the recipient source, e.g. `segment "VIPs"` or "42 selected contact(s)".
+  label            String?
+
+  total   Int @default(0)
+  sent    Int @default(0)
+  failed  Int @default(0)
+  skipped Int @default(0)
+
+  status    String   @default("RUNNING") // RUNNING | DONE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messageLogs MessageLog[]
+
+  @@index([shop, createdAt])
+}
+
+/// Durable background job queue (see DECISIONS.md §11). Deliberately DB-backed rather than
+/// Redis-backed so the app needs no infrastructure beyond Postgres. Claimed with an optimistic
+/// compare-and-set on `status`, so multiple app instances can run workers safely.
+model Job {
+  id     String @id @default(cuid())
+  shop   String
+  type   String // SEND_ONE | BACKFILL_CUSTOMERS
+  status String @default("PENDING") // PENDING | RUNNING | DONE | FAILED
+
+  payload String // JSON.stringify(...) — shape depends on `type`
+
+  /// Optional caller-supplied idempotency key. A second enqueue with the same key is a no-op,
+  /// which is what makes "retry the whole batch" safe.
+  dedupeKey String?
+
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(3)
+  runAt       DateTime @default(now())
+  lockedAt    DateTime?
+  lockedBy    String?
+  lastError   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, dedupeKey])
+  /// The worker's claim query: oldest runnable job first.
+  @@index([status, runAt])
+  @@index([shop, type, status])
 }
 
 /// Dedup ledger for order webhooks: an atomic, exact-match idempotency lock keyed by order GID.
@@ -233,6 +309,29 @@ model ProcessedOrder {
   @@index([shop])
 }
 
+/// A `customers/data_request` GDPR/CCPA export, held for the merchant to retrieve.
+///
+/// Shopify provides no callback for data requests — the merchant is responsible for delivering
+/// the data to the customer, and has 30 days to do it. Logging the payload (the previous
+/// behavior) left them with nothing to deliver, so the obligation went unmet. See DECISIONS.md §14.
+model DataRequest {
+  id                String  @id @default(cuid())
+  shop              String
+  shopifyCustomerId String
+  customerEmail     String?
+  /// JSON.stringify of the assembled CRM export for this customer.
+  payload           String
+  status            String  @default("OPEN") // OPEN | RESOLVED
+  /// Set when a staff member marks the request as fulfilled.
+  resolvedAt        DateTime?
+  resolvedByStaffId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
+  @@index([shop, status])
+}
+
 model ShopSettings {
   id   String @id @default(cuid())
   shop String @unique
@@ -244,6 +343,14 @@ model ShopSettings {
   brevoSenderEmail     String?
   brevoSenderName      String?
   brevoSmsSender       String?
+
+  // --- Marketing compliance (see DECISIONS.md §10) ---
+  // CAN-SPAM requires a valid physical postal address in every marketing email, and a working
+  // opt-out mechanism. Marketing email sends are BLOCKED until `businessAddress` is set.
+  businessAddress String?
+  /// Merchant-hosted unsubscribe page. When null, the footer falls back to a mailto: opt-out
+  /// addressed to the configured sender.
+  unsubscribeUrl  String?
 
   // Inbound (two-way) messaging via Brevo Conversations webhooks. The token is the secret in the
   // per-shop webhook URL (capability URL); the optional secret is an extra basic-auth check,

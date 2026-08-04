@@ -1,10 +1,15 @@
 /**
- * Messaging orchestration: render merge vars per recipient, send via Brevo, write a MessageLog
- * for every attempt, and append an EMAIL_SENT / SMS_SENT activity. SERVER ONLY.
+ * Messaging orchestration: enforce marketing consent, render merge vars per recipient, send via
+ * Brevo, write a MessageLog for every attempt, and append an EMAIL_SENT / SMS_SENT activity.
+ * SERVER ONLY.
  *
- * Single send (detail page) and bulk send (multi-select / segment) both route through here.
- * Bulk email uses Brevo's `messageVersions` batch (one API call per chunk); bulk SMS is
- * sequential (Brevo has no SMS batch endpoint) and relies on the client's retry/backoff.
+ * CONSENT IS ENFORCED HERE AND ONLY HERE (see DECISIONS.md §10). Every path that can put a
+ * message on the wire funnels through `sendOneToContact`, which refuses to send to a contact
+ * whose mirrored Shopify marketing state is not `SUBSCRIBED`. Callers cannot opt out of the
+ * check — there is no bypass parameter, deliberately.
+ *
+ * Single send (detail page) and bulk send (one Job per recipient, see jobs/) both call
+ * `sendOneToContact`, so the gate, the logging and the idempotency behave identically.
  */
 
 import type { Contact } from "@prisma/client";
@@ -16,16 +21,14 @@ import { normalizeE164 } from "../phone";
 import { displayName, formatDate, formatMoney, parseMoney } from "../format";
 import { logActivity, parseActivityPayload } from "./activity.server";
 import { getDecryptedBrevoKey, getOrCreateSettings } from "./settings.server";
-import type { Channel, MessageStatus } from "./constants";
+import { canReceive, consentStateFor } from "./constants";
+import type { Channel, MessageStatus, SkipReason } from "./constants";
+import {
+  unsubscribeHeaders,
+  withFooters,
+  type FooterConfig,
+} from "./compliance-footer";
 import type { MergeVars } from "./types";
-
-const EMAIL_BATCH_SIZE = 100;
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
 
 /* ------------------------------------------------------------------ */
 /* Merge variable context                                              */
@@ -91,10 +94,7 @@ export async function buildMergeVarsMap(
 /* History                                                             */
 /* ------------------------------------------------------------------ */
 
-/**
- * All message attempts for one contact, oldest-first (chronological thread order). These are the
- * outbound messages sent from this shop — Brevo BYOK is send-only, so there is no inbound capture.
- */
+/** All message attempts for one contact, oldest-first (chronological thread order). */
 export async function listMessageLogs(shop: string, contactId: string, limit = 200) {
   const logs = await prisma.messageLog.findMany({
     where: { shop, contactId },
@@ -108,16 +108,25 @@ export async function listMessageLogs(shop: string, contactId: string, limit = 2
 /* Sender preflight                                                    */
 /* ------------------------------------------------------------------ */
 
-interface SenderPrep {
+export interface SenderPrep {
   ok: boolean;
   error?: string;
   apiKey?: string;
   senderEmail?: string;
   senderName?: string;
   smsSender?: string;
+  /** Present for EMAIL only — postal address + opt-out target for the required footer. */
+  footer?: FooterConfig;
 }
 
-async function prepareSend(shop: string, channel: Channel): Promise<SenderPrep> {
+/**
+ * Resolve everything needed to send on `channel`, or an actionable error.
+ *
+ * For EMAIL this also enforces that the merchant has configured a physical postal address:
+ * CAN-SPAM makes it mandatory in marketing mail, so sending without one is not an option we
+ * offer. The error text points at the exact Settings field to fill in.
+ */
+export async function prepareSend(shop: string, channel: Channel): Promise<SenderPrep> {
   const settings = await getOrCreateSettings(shop);
   if (!settings.brevoApiKeyEncrypted || !settings.brevoConnected) {
     return { ok: false, error: "Connect Brevo in Settings before sending." };
@@ -137,11 +146,25 @@ async function prepareSend(shop: string, channel: Channel): Promise<SenderPrep> 
     if (!settings.brevoSenderEmail) {
       return { ok: false, error: "Set a verified sender email in Settings before sending email." };
     }
+    if (!settings.businessAddress?.trim()) {
+      return {
+        ok: false,
+        error:
+          "Add your business postal address in Settings before sending email. " +
+          "Anti-spam law (CAN-SPAM) requires it in every marketing message.",
+      };
+    }
     return {
       ok: true,
       apiKey,
       senderEmail: settings.brevoSenderEmail,
       senderName: settings.brevoSenderName ?? undefined,
+      footer: {
+        businessAddress: settings.businessAddress,
+        unsubscribeUrl: settings.unsubscribeUrl,
+        senderEmail: settings.brevoSenderEmail,
+        senderName: settings.brevoSenderName,
+      },
     };
   }
   if (!settings.brevoSmsSender) {
@@ -151,35 +174,120 @@ async function prepareSend(shop: string, channel: Channel): Promise<SenderPrep> 
 }
 
 /* ------------------------------------------------------------------ */
+/* Recipient eligibility                                               */
+/* ------------------------------------------------------------------ */
+
+interface RecipientContact {
+  email?: string | null;
+  phone?: string | null;
+  emailMarketingState?: string | null;
+  smsMarketingState?: string | null;
+}
+
+export interface Ineligible {
+  reason: SkipReason;
+  detail: string;
+}
+
+/**
+ * Decide whether a contact may be messaged on `channel`, without sending anything.
+ *
+ * Consent is checked FIRST and independently of whether an address exists, so a non-consented
+ * contact is always recorded as NO_CONSENT rather than being masked by a missing-address skip.
+ * Returns null when the contact is eligible.
+ */
+export function checkEligibility(
+  channel: Channel,
+  contact: RecipientContact,
+): Ineligible | null {
+  if (!canReceive(channel, contact)) {
+    const state = consentStateFor(channel, contact);
+    return {
+      reason: "NO_CONSENT",
+      detail: `Not subscribed to ${channel === "EMAIL" ? "email" : "SMS"} marketing (Shopify state: ${state ?? "unknown"}).`,
+    };
+  }
+  if (channel === "EMAIL") {
+    if (!contact.email) {
+      return { reason: "NO_ADDRESS", detail: "Contact has no email address." };
+    }
+    return null;
+  }
+  const phone = normalizeE164(contact.phone);
+  if (!phone.ok) {
+    return { reason: "INVALID_PHONE", detail: phone.reason };
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
 /* Logging                                                             */
 /* ------------------------------------------------------------------ */
 
-interface LogInput {
+interface ClaimInput {
+  shop: string;
+  contactId: string;
+  channel: Channel;
+  subject: string | null;
+  bodySnapshot: string;
+  templateId?: string | null;
+  sentByStaffId?: string | null;
+  batchId?: string | null;
+}
+
+/**
+ * Reserve the right to send to this contact by writing a QUEUED MessageLog row.
+ *
+ * When `batchId` is set, the unique (batchId, contactId) index turns this into the bulk-send
+ * idempotency guard: a retried job hits P2002 and gets `null` back, so a recipient can never be
+ * messaged twice by the same batch — even if the worker crashed mid-send and the job re-ran.
+ * Returns the log id, or null when this recipient was already claimed.
+ */
+async function claimLog(input: ClaimInput): Promise<string | null> {
+  try {
+    const log = await prisma.messageLog.create({
+      data: {
+        shop: input.shop,
+        contactId: input.contactId,
+        channel: input.channel,
+        subject: input.subject,
+        bodySnapshot: input.bodySnapshot,
+        status: "QUEUED",
+        templateId: input.templateId ?? null,
+        sentByStaffId: input.sentByStaffId ?? null,
+        batchId: input.batchId ?? null,
+      },
+      select: { id: true },
+    });
+    return log.id;
+  } catch (error) {
+    if ((error as { code?: string }).code === "P2002") return null; // already claimed
+    throw error;
+  }
+}
+
+interface FinalizeInput {
+  logId: string;
   shop: string;
   contactId: string;
   channel: Channel;
   subject: string | null;
   bodySnapshot: string;
   status: MessageStatus;
+  skipReason?: SkipReason | null;
   providerMessageId?: string | null;
   error?: string | null;
-  templateId?: string | null;
-  sentByStaffId?: string | null;
 }
 
-async function writeLog(input: LogInput): Promise<string> {
-  const log = await prisma.messageLog.create({
+/** Move a claimed log row to its terminal state, and record the timeline activity on success. */
+async function finalizeLog(input: FinalizeInput): Promise<void> {
+  await prisma.messageLog.update({
+    where: { id: input.logId },
     data: {
-      shop: input.shop,
-      contactId: input.contactId,
-      channel: input.channel,
-      subject: input.subject,
-      bodySnapshot: input.bodySnapshot,
       status: input.status,
+      skipReason: input.skipReason ?? null,
       providerMessageId: input.providerMessageId ?? null,
       error: input.error ?? null,
-      templateId: input.templateId ?? null,
-      sentByStaffId: input.sentByStaffId ?? null,
     },
   });
   if (input.status === "SENT") {
@@ -188,19 +296,25 @@ async function writeLog(input: LogInput): Promise<string> {
       contactId: input.contactId,
       type: input.channel === "EMAIL" ? "EMAIL_SENT" : "SMS_SENT",
       payload: {
-        messageLogId: log.id,
+        messageLogId: input.logId,
         subject: input.subject,
         preview: input.bodySnapshot.slice(0, 120),
       },
     });
   }
-  return log.id;
 }
 
 /* ------------------------------------------------------------------ */
 /* Test send (Settings page) — no contact / no MessageLog              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Send a test message to an address the merchant just typed in Settings.
+ *
+ * No consent check: the merchant is messaging themselves to verify their own configuration,
+ * the content is fixed boilerplate, and there is no Contact involved. The compliance footer is
+ * still applied so the merchant sees exactly what recipients will see.
+ */
 export async function sendTestMessage(
   shop: string,
   channel: Channel,
@@ -212,14 +326,17 @@ export async function sendTestMessage(
   if (channel === "EMAIL") {
     const to = recipient.trim();
     if (!to) return { ok: false, error: "Enter a test email address." };
+    const parts = withFooters(prep.footer!, {
+      html: "<p>This is a test email from Easy CRM via Brevo. If you received it, your sending setup works. 🎉</p>",
+      text: "This is a test email from Easy CRM via Brevo. If you received it, your sending setup works.",
+    });
     const res = await sendBrevoEmail(prep.apiKey!, {
       sender: { email: prep.senderEmail!, name: prep.senderName },
       to: [{ email: to }],
       subject: "Easy CRM test email",
-      htmlContent:
-        "<p>This is a test email from Easy CRM via Brevo. If you received it, your sending setup works. 🎉</p>",
-      textContent:
-        "This is a test email from Easy CRM via Brevo. If you received it, your sending setup works.",
+      htmlContent: parts.html,
+      textContent: parts.text,
+      headers: unsubscribeHeaders(prep.footer!),
     });
     return res.ok ? { ok: true } : { ok: false, error: res.error };
   }
@@ -236,7 +353,7 @@ export async function sendTestMessage(
 }
 
 /* ------------------------------------------------------------------ */
-/* Single send                                                         */
+/* Single send — the one and only path to the wire                     */
 /* ------------------------------------------------------------------ */
 
 export interface SendParams {
@@ -246,52 +363,117 @@ export interface SendParams {
   body: string;
   templateId?: string | null;
   sentByStaffId?: string | null;
+  /** Set by the bulk worker; enables per-(batch,contact) idempotency. */
+  batchId?: string | null;
 }
 
 export interface SendOutcome {
   ok: boolean;
-  status: MessageStatus | "BLOCKED";
+  status: MessageStatus | "BLOCKED" | "DUPLICATE";
   error?: string;
+  skipReason?: SkipReason;
   messageLogId?: string;
 }
 
-export async function sendToContact(shop: string, params: SendParams): Promise<SendOutcome> {
+/**
+ * Send one message to one contact.
+ *
+ * Order of operations is deliberate:
+ *   1. resolve the contact (shop-scoped),
+ *   2. CONSENT + address eligibility — before any credential work or network call,
+ *   3. sender preflight,
+ *   4. claim a log row (idempotency),
+ *   5. send, then finalize the row.
+ *
+ * `prep` may be passed in by the bulk worker to avoid re-decrypting the API key per recipient.
+ */
+export async function sendOneToContact(
+  shop: string,
+  params: SendParams,
+  prep?: SenderPrep,
+): Promise<SendOutcome> {
   const contact = await prisma.contact.findFirst({
     where: { id: params.contactId, shop },
   });
   if (!contact) return { ok: false, status: "BLOCKED", error: "Contact not found." };
 
-  const prep = await prepareSend(shop, params.channel);
-  if (!prep.ok) return { ok: false, status: "BLOCKED", error: prep.error };
-
   const vars = (await buildMergeVarsMap(shop, [contact])).get(contact.id)!;
   const body = renderMerge(params.body, vars).text;
+  const subject =
+    params.channel === "EMAIL"
+      ? renderMerge(params.subject ?? "", vars).text || "(no subject)"
+      : null;
+
+  // --- The consent gate. Nothing below this line runs for a non-consented contact. ---
+  const ineligible = checkEligibility(params.channel, contact);
+  if (ineligible) {
+    const logId = await claimLog({
+      shop,
+      contactId: contact.id,
+      channel: params.channel,
+      subject,
+      bodySnapshot: body,
+      templateId: params.templateId,
+      sentByStaffId: params.sentByStaffId,
+      batchId: params.batchId,
+    });
+    if (!logId) return { ok: false, status: "DUPLICATE" };
+    await finalizeLog({
+      logId,
+      shop,
+      contactId: contact.id,
+      channel: params.channel,
+      subject,
+      bodySnapshot: body,
+      status: "SKIPPED",
+      skipReason: ineligible.reason,
+      error: ineligible.detail,
+    });
+    return {
+      ok: false,
+      status: "SKIPPED",
+      skipReason: ineligible.reason,
+      error: ineligible.detail,
+      messageLogId: logId,
+    };
+  }
+
+  const sender = prep ?? (await prepareSend(shop, params.channel));
+  if (!sender.ok) return { ok: false, status: "BLOCKED", error: sender.error };
+
+  const logId = await claimLog({
+    shop,
+    contactId: contact.id,
+    channel: params.channel,
+    subject,
+    bodySnapshot: body,
+    templateId: params.templateId,
+    sentByStaffId: params.sentByStaffId,
+    batchId: params.batchId,
+  });
+  if (!logId) return { ok: false, status: "DUPLICATE" };
 
   if (params.channel === "EMAIL") {
-    const subject = renderMerge(params.subject ?? "", vars).text || "(no subject)";
-    if (!contact.email) {
-      const id = await writeLog({
-        shop,
-        contactId: contact.id,
-        channel: "EMAIL",
-        subject,
-        bodySnapshot: body,
-        status: "FAILED",
-        error: "Contact has no email address.",
-        templateId: params.templateId,
-        sentByStaffId: params.sentByStaffId,
-      });
-      return { ok: false, status: "FAILED", error: "Contact has no email address.", messageLogId: id };
-    }
+    const parts = withFooters(sender.footer!, {
+      html: plainToHtml(body),
+      text: body,
+    });
     const req: BrevoEmailRequest = {
-      sender: { email: prep.senderEmail!, name: prep.senderName },
-      to: [{ email: contact.email, name: displayName(contact.firstName, contact.lastName, "") || undefined }],
-      subject,
-      htmlContent: plainToHtml(body),
-      textContent: body,
+      sender: { email: sender.senderEmail!, name: sender.senderName },
+      to: [
+        {
+          email: contact.email!,
+          name: displayName(contact.firstName, contact.lastName, "") || undefined,
+        },
+      ],
+      subject: subject!,
+      htmlContent: parts.html,
+      textContent: parts.text,
+      headers: unsubscribeHeaders(sender.footer!),
     };
-    const res = await sendBrevoEmail(prep.apiKey!, req);
-    const id = await writeLog({
+    const res = await sendBrevoEmail(sender.apiKey!, req);
+    await finalizeLog({
+      logId,
       shop,
       contactId: contact.id,
       channel: "EMAIL",
@@ -300,37 +482,22 @@ export async function sendToContact(shop: string, params: SendParams): Promise<S
       status: res.ok ? "SENT" : "FAILED",
       providerMessageId: res.ok ? res.data.messageId ?? null : null,
       error: res.ok ? null : res.error,
-      templateId: params.templateId,
-      sentByStaffId: params.sentByStaffId,
     });
     return res.ok
-      ? { ok: true, status: "SENT", messageLogId: id }
-      : { ok: false, status: "FAILED", error: res.error, messageLogId: id };
+      ? { ok: true, status: "SENT", messageLogId: logId }
+      : { ok: false, status: "FAILED", error: res.error, messageLogId: logId };
   }
 
-  // SMS
+  // SMS — eligibility already proved the phone normalizes.
   const phone = normalizeE164(contact.phone);
-  if (!phone.ok) {
-    const id = await writeLog({
-      shop,
-      contactId: contact.id,
-      channel: "SMS",
-      subject: null,
-      bodySnapshot: body,
-      status: "FAILED",
-      error: phone.reason,
-      templateId: params.templateId,
-      sentByStaffId: params.sentByStaffId,
-    });
-    return { ok: false, status: "FAILED", error: phone.reason, messageLogId: id };
-  }
-  const res = await sendBrevoSms(prep.apiKey!, {
-    sender: prep.smsSender!,
-    recipient: toBrevoSmsRecipient(phone.e164),
+  const res = await sendBrevoSms(sender.apiKey!, {
+    sender: sender.smsSender!,
+    recipient: toBrevoSmsRecipient(phone.ok ? phone.e164 : ""),
     content: body,
-    type: "transactional",
+    type: "marketing",
   });
-  const id = await writeLog({
+  await finalizeLog({
+    logId,
     shop,
     contactId: contact.id,
     channel: "SMS",
@@ -339,169 +506,11 @@ export async function sendToContact(shop: string, params: SendParams): Promise<S
     status: res.ok ? "SENT" : "FAILED",
     providerMessageId: res.ok ? (res.data.messageId != null ? String(res.data.messageId) : null) : null,
     error: res.ok ? null : res.error,
-    templateId: params.templateId,
-    sentByStaffId: params.sentByStaffId,
   });
   return res.ok
-    ? { ok: true, status: "SENT", messageLogId: id }
-    : { ok: false, status: "FAILED", error: res.error, messageLogId: id };
+    ? { ok: true, status: "SENT", messageLogId: logId }
+    : { ok: false, status: "FAILED", error: res.error, messageLogId: logId };
 }
 
-/* ------------------------------------------------------------------ */
-/* Bulk send                                                           */
-/* ------------------------------------------------------------------ */
-
-export interface BulkSendParams {
-  contactIds: string[];
-  channel: Channel;
-  subject?: string;
-  body: string;
-  templateId?: string | null;
-  sentByStaffId?: string | null;
-}
-
-export interface BulkSendResult {
-  ok: boolean;
-  error?: string;
-  sent: number;
-  failed: number;
-  skipped: number;
-  total: number;
-}
-
-export async function sendBulk(shop: string, params: BulkSendParams): Promise<BulkSendResult> {
-  const base: BulkSendResult = {
-    ok: true,
-    sent: 0,
-    failed: 0,
-    skipped: 0,
-    total: params.contactIds.length,
-  };
-
-  const prep = await prepareSend(shop, params.channel);
-  if (!prep.ok) return { ...base, ok: false, error: prep.error };
-
-  const contacts = await prisma.contact.findMany({
-    where: { shop, id: { in: params.contactIds } },
-  });
-  const varsMap = await buildMergeVarsMap(shop, contacts);
-
-  if (params.channel === "EMAIL") {
-    const withEmail = contacts.filter((c) => c.email);
-    const withoutEmail = contacts.filter((c) => !c.email);
-
-    // Skipped: no email address.
-    for (const c of withoutEmail) {
-      await writeLog({
-        shop,
-        contactId: c.id,
-        channel: "EMAIL",
-        subject: renderMerge(params.subject ?? "", varsMap.get(c.id)!).text || "(no subject)",
-        bodySnapshot: renderMerge(params.body, varsMap.get(c.id)!).text,
-        status: "FAILED",
-        error: "Contact has no email address.",
-        templateId: params.templateId,
-        sentByStaffId: params.sentByStaffId,
-      });
-      base.skipped += 1;
-    }
-
-    for (const group of chunk(withEmail, EMAIL_BATCH_SIZE)) {
-      const versions = group.map((c) => {
-        const vars = varsMap.get(c.id)!;
-        const subject = renderMerge(params.subject ?? "", vars).text || "(no subject)";
-        const body = renderMerge(params.body, vars).text;
-        return {
-          contact: c,
-          subject,
-          body,
-          to: [
-            {
-              email: c.email!,
-              name: displayName(c.firstName, c.lastName, "") || undefined,
-            },
-          ],
-        };
-      });
-
-      const req: BrevoEmailRequest = {
-        sender: { email: prep.senderEmail!, name: prep.senderName },
-        // Top-level fields are the batch default; each messageVersion overrides them, so the
-        // first recipient here is just a placeholder default (not a duplicate send).
-        to: versions[0].to,
-        subject: versions[0]?.subject ?? "(no subject)",
-        htmlContent: plainToHtml(versions[0]?.body ?? ""),
-        messageVersions: versions.map((v) => ({
-          to: v.to,
-          subject: v.subject,
-          htmlContent: plainToHtml(v.body),
-          textContent: v.body,
-        })),
-      };
-
-      const res = await sendBrevoEmail(prep.apiKey!, req);
-      const messageIds = res.ok ? res.data.messageIds ?? [] : [];
-      for (let i = 0; i < versions.length; i += 1) {
-        const v = versions[i];
-        await writeLog({
-          shop,
-          contactId: v.contact.id,
-          channel: "EMAIL",
-          subject: v.subject,
-          bodySnapshot: v.body,
-          status: res.ok ? "SENT" : "FAILED",
-          providerMessageId: res.ok ? messageIds[i] ?? null : null,
-          error: res.ok ? null : res.error,
-          templateId: params.templateId,
-          sentByStaffId: params.sentByStaffId,
-        });
-        if (res.ok) base.sent += 1;
-        else base.failed += 1;
-      }
-    }
-    return base;
-  }
-
-  // SMS — sequential (no batch endpoint).
-  for (const c of contacts) {
-    const vars = varsMap.get(c.id)!;
-    const body = renderMerge(params.body, vars).text;
-    const phone = normalizeE164(c.phone);
-    if (!phone.ok) {
-      await writeLog({
-        shop,
-        contactId: c.id,
-        channel: "SMS",
-        subject: null,
-        bodySnapshot: body,
-        status: "FAILED",
-        error: phone.reason,
-        templateId: params.templateId,
-        sentByStaffId: params.sentByStaffId,
-      });
-      base.skipped += 1;
-      continue;
-    }
-    const res = await sendBrevoSms(prep.apiKey!, {
-      sender: prep.smsSender!,
-      recipient: toBrevoSmsRecipient(phone.e164),
-      content: body,
-      type: "transactional",
-    });
-    await writeLog({
-      shop,
-      contactId: c.id,
-      channel: "SMS",
-      subject: null,
-      bodySnapshot: body,
-      status: res.ok ? "SENT" : "FAILED",
-      providerMessageId: res.ok ? (res.data.messageId != null ? String(res.data.messageId) : null) : null,
-      error: res.ok ? null : res.error,
-      templateId: params.templateId,
-      sentByStaffId: params.sentByStaffId,
-    });
-    if (res.ok) base.sent += 1;
-    else base.failed += 1;
-  }
-  return base;
-}
+/** Backwards-compatible alias — the detail page's single-send entry point. */
+export const sendToContact = sendOneToContact;

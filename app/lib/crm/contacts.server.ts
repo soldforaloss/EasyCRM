@@ -7,6 +7,7 @@ import type { Contact, Prisma } from "@prisma/client";
 import prisma from "../../db.server";
 import {
   DEFAULT_LIFECYCLE_STAGE,
+  canReceive,
   isLifecycleStage,
   spendTierById,
   type LifecycleStage,
@@ -228,21 +229,66 @@ export async function resolveOwnedContactIds(
 }
 
 /** Count how many of the given contacts can receive email / valid SMS (for bulk summaries). */
+export interface ChannelCounts {
+  withEmail: number;
+  withValidPhone: number;
+  /** Consented AND reachable — the number that will actually be sent. */
+  emailReachable: number;
+  smsReachable: number;
+  /** Have the address but are not subscribed, so they will be skipped as NO_CONSENT. */
+  emailNoConsent: number;
+  smsNoConsent: number;
+}
+
+/**
+ * Recipient breakdown for the bulk-send screen.
+ *
+ * Reports reachability and consent separately so the merchant sees why a selection of 500 will
+ * only send to 120 *before* they hit send, rather than discovering it in the results.
+ */
 export async function getContactChannelCounts(
   shop: string,
   ids: string[],
-): Promise<{ withEmail: number; withValidPhone: number }> {
-  if (ids.length === 0) return { withEmail: 0, withValidPhone: 0 };
+): Promise<ChannelCounts> {
+  const empty: ChannelCounts = {
+    withEmail: 0,
+    withValidPhone: 0,
+    emailReachable: 0,
+    smsReachable: 0,
+    emailNoConsent: 0,
+    smsNoConsent: 0,
+  };
+  if (ids.length === 0) return empty;
+
   const rows = await prisma.contact.findMany({
     where: { shop, id: { in: ids } },
-    select: { email: true, phone: true },
+    select: {
+      email: true,
+      phone: true,
+      emailMarketingState: true,
+      smsMarketingState: true,
+    },
   });
   const { normalizeE164 } = await import("../phone");
-  let withEmail = 0;
-  let withValidPhone = 0;
+
+  const counts = { ...empty };
   for (const r of rows) {
-    if (r.email) withEmail += 1;
-    if (normalizeE164(r.phone).ok) withValidPhone += 1;
+    const hasEmail = Boolean(r.email);
+    const hasPhone = normalizeE164(r.phone).ok;
+    if (hasEmail) counts.withEmail += 1;
+    if (hasPhone) counts.withValidPhone += 1;
+
+    if (canReceive("EMAIL", r)) {
+      if (hasEmail) counts.emailReachable += 1;
+    } else if (hasEmail) {
+      counts.emailNoConsent += 1;
+    }
+
+    if (canReceive("SMS", r)) {
+      if (hasPhone) counts.smsReachable += 1;
+    } else if (hasPhone) {
+      counts.smsNoConsent += 1;
+    }
   }
-  return { withEmail, withValidPhone };
+  return counts;
 }

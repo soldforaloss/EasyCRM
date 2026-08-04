@@ -15,9 +15,11 @@ import {
   rotateInboundToken,
   saveBrevoKey,
   setInboundSecret,
+  updateComplianceSettings,
   updateSenderSettings,
 } from "../lib/crm/settings.server";
 import { sendTestMessage } from "../lib/crm/messaging.server";
+import { invalidatePrepCache } from "../lib/crm/sender-cache.server";
 import { isChannel } from "../lib/crm/constants";
 import { ConfirmAction } from "../components/confirm";
 import { useActionToast } from "../lib/use-action-toast";
@@ -59,7 +61,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           senderName: String(form.get("senderName") ?? ""),
           smsSender: String(form.get("smsSender") ?? ""),
         });
+        // In-flight bulk jobs cache the sender preflight — drop it so the change takes effect now.
+        invalidatePrepCache(shop);
         return { ok: true, toast: "Sender settings saved." };
+      case "saveCompliance": {
+        const result = await updateComplianceSettings(shop, {
+          businessAddress: String(form.get("businessAddress") ?? ""),
+          unsubscribeUrl: String(form.get("unsubscribeUrl") ?? ""),
+        });
+        invalidatePrepCache(shop);
+        return result.ok
+          ? { ok: true, toast: "Marketing compliance settings saved." }
+          : { ok: false, toast: result.error ?? "Could not save compliance settings." };
+      }
       case "sendTest": {
         const channel = String(form.get("channel") ?? "");
         if (!isChannel(channel)) return { ok: false, toast: "Choose a channel." };
@@ -192,6 +206,47 @@ export default function SettingsPage() {
             </s-button>
           </s-stack>
         </Form>
+      </s-section>
+
+      {/* Marketing compliance -------------------------------------------- */}
+      <s-section heading="Marketing compliance">
+        {!status.emailComplianceReady ? (
+          <s-banner tone="warning">
+            <s-paragraph>
+              Email sending is disabled until you add a business postal address. Anti-spam law
+              (CAN-SPAM) requires a valid physical address in every marketing email.
+            </s-paragraph>
+          </s-banner>
+        ) : null}
+        <Form method="post">
+          <input type="hidden" name="_action" value="saveCompliance" />
+          <s-stack direction="block" gap="base">
+            <s-text-area
+              name="businessAddress"
+              label="Business postal address (required for email)"
+              value={status.businessAddress ?? ""}
+              placeholder={"Your Shop Ltd\n123 Example St\nPhoenix, AZ 85001\nUnited States"}
+              rows={4}
+            />
+            <s-url-field
+              name="unsubscribeUrl"
+              label="Unsubscribe page URL (optional)"
+              value={status.unsubscribeUrl ?? ""}
+              placeholder="https://yourshop.com/unsubscribe"
+              details="Added to every marketing email and to the one-click List-Unsubscribe header. If left blank, a mailto: opt-out to your sender address is used instead — a hosted page is strongly recommended for deliverability with Gmail and Yahoo."
+            />
+            <s-button type="submit" variant="primary">
+              Save compliance settings
+            </s-button>
+          </s-stack>
+        </Form>
+        <s-banner tone="info">
+          <s-paragraph>
+            Easy CRM only messages customers whose Shopify marketing status is “Subscribed”.
+            Everyone else is skipped automatically and recorded on the contact’s timeline — you do
+            not need to filter your lists manually.
+          </s-paragraph>
+        </s-banner>
       </s-section>
 
       {/* Deliverability note -------------------------------------------- */}

@@ -22,6 +22,11 @@ export interface BrevoEmailRequest {
   textContent?: string;
   params?: Record<string, unknown>;
   templateId?: number;
+  /**
+   * Custom SMTP headers. Used for `List-Unsubscribe` / `List-Unsubscribe-Post`, which give
+   * mailbox providers a native one-click opt-out — required by Gmail/Yahoo bulk sender rules.
+   */
+  headers?: Record<string, string>;
   /** Batch personalization — one version per recipient set in a single API call. */
   messageVersions?: Array<{
     to: BrevoContactRef[];
@@ -29,6 +34,7 @@ export interface BrevoEmailRequest {
     htmlContent?: string;
     textContent?: string;
     params?: Record<string, unknown>;
+    headers?: Record<string, string>;
   }>;
 }
 

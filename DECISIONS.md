@@ -169,3 +169,153 @@ delegation) because it covers SMS too.
 - **Unmatched senders are skipped + logged** — `MessageLog.contactId` is required and the mirror
   assumes every Contact maps to a Shopify customer, so auto-creating "shadow" contacts is out of scope
   (would need a nullable `shopifyCustomerId`). A future "unmatched inbox" could revisit.
+
+---
+
+# Production-readiness changes (2026-08-03)
+
+The sections below record the changes made to take the app from "feature-complete build" to
+"deployable". They supersede §2, §6 and §8 where they conflict.
+
+## 10. Marketing consent is enforced, not just displayed
+
+**Problem.** The app fetched `emailMarketingState` / `smsMarketingState` from Shopify and rendered
+them on the contact detail page, but the send path never consulted them. Every contact with an
+address was messageable regardless of whether they had opted in. Outbound email carried no
+unsubscribe mechanism and no postal address, and contact SMS was sent with Brevo's
+`type: "transactional"`. That combination is a CAN-SPAM / TCPA / GDPR exposure for the merchant and
+a near-certain App Store rejection.
+
+**Decision.**
+
+- `Contact.emailMarketingState` / `Contact.smsMarketingState` are now mirrored columns, written by
+  the install backfill and refreshed on every `customers/*` webhook via `fetchCustomerSyncFields`.
+  They are written **unconditionally**, including back to `NULL` — an opt-out has to be able to
+  clear a previously granted consent, so these are never spread-guarded.
+- `hasMarketingConsent()` in `constants.ts` is the single definition: **only `SUBSCRIBED` permits
+  contact.** `PENDING` (double opt-in unconfirmed) and `NULL` (never synced) do not. The gate
+  **fails closed** — a wrong "allow" is a legal violation, a wrong "deny" is one unsent message.
+- `sendOneToContact()` in `messaging.server.ts` is the **only** path to the wire, and it checks
+  consent before any credential work or network call. There is deliberately **no bypass parameter**.
+  Single send and bulk send both route through it, so the gate cannot be sidestepped by a caller.
+- Suppressed sends are recorded as `MessageLog.status = "SKIPPED"` with a `skipReason`, so the
+  merchant can see exactly who was not contacted and why. A skip is **not** a failure and does not
+  produce an `EMAIL_SENT` / `SMS_SENT` timeline activity.
+- Consent is checked **before** address validity, so a non-consented contact is always recorded as
+  `NO_CONSENT` rather than being masked by `NO_ADDRESS` — the two have different remedies.
+- Every marketing email now carries a footer with the merchant's physical postal address and an
+  opt-out link, plus `List-Unsubscribe` / `List-Unsubscribe-Post` headers (RFC 2369 / RFC 8058) for
+  Gmail and Yahoo one-click unsubscribe. Brevo does not add these to `/v3/smtp/email` sends, so the
+  app supplies them. One-click POST is advertised only for `https:` targets — RFC 8058 one-click is
+  undefined for `mailto:`.
+- **Email sending is blocked outright** until `ShopSettings.businessAddress` is set, because
+  CAN-SPAM makes the address mandatory and there is no compliant way to send without it.
+- Contact SMS is now sent as `type: "marketing"`. The Settings *test* send stays transactional: the
+  merchant is messaging themselves with fixed boilerplate to verify configuration.
+
+## 11. Bulk send is a durable job queue, not an inline loop
+
+**Problem.** `sendBulk` iterated recipients inside the HTTP request — SMS strictly sequentially, one
+Brevo call at a time — against a segment resolved at `pageSize: 1000`. Any real campaign would
+exceed the platform request timeout mid-send, leaving a partial send with no resumption and no
+record of where it stopped. The install backfill had the same shape on the OAuth callback, where a
+large-catalog shop would fail the install.
+
+**Decision.** A `Job` table plus an in-process worker (`app/lib/jobs/`).
+
+- DB-backed rather than Redis-backed: Postgres is already required, and a second stateful dependency
+  is not worth the operational cost for this workload. Throughput is bounded by the Brevo API anyway.
+- Jobs are claimed with an **optimistic compare-and-set** on `status`
+  (`updateMany where {id, status:"PENDING"}`). Exactly one worker's update can match, so multiple
+  app instances share the queue safely without advisory locks or `SELECT … FOR UPDATE`.
+- A bulk send writes one `MessageBatch` + one `SEND_ONE` job per recipient and returns immediately.
+  Idempotency is layered: `Job.dedupeKey = send:<batchId>:<contactId>` makes re-enqueueing a no-op,
+  and a unique `MessageLog (batchId, contactId)` means even a doubly-executed job cannot send twice
+  (the send is *claimed* before it is attempted, not logged after).
+- Batch counters are **derived** from `MessageLog` rows rather than incremented, because increments
+  would drift on every job retry.
+- Failures retry with exponential backoff up to `maxAttempts`, then park in `FAILED` — jobs are
+  never silently dropped. `RUNNING` jobs whose worker died are reclaimed after 5 minutes.
+- Handlers distinguish transient from permanent: a handler that throws is retried, so per-recipient
+  outcomes already recorded on the `MessageLog` (no consent, bad address, Brevo 4xx) must **not**
+  throw. Only transport failures do.
+- The install backfill is now an enqueued `BACKFILL_CUSTOMERS` job, so OAuth returns immediately.
+
+**Deployment constraint.** The worker requires a process that stays alive between requests. The
+Dockerfile target satisfies this; a freeze-between-requests serverless platform does not, and would
+need a dedicated always-on worker process that this build does not ship. `RUN_JOB_WORKER=false`
+disables the loop on a given instance.
+
+## 12. Observability and abuse control
+
+- `app/lib/logger.server.ts` emits one JSON object per line (level, event, timestamp, context), so
+  logs are searchable and alertable. Keys matching `api_key|secret|token|password|authorization` are
+  redacted before emission. The previous free-text `console.log` calls could not be queried on.
+- `reportError()` forwards to Sentry when `SENTRY_DSN` is set **and** `@sentry/node` is installed.
+  Sentry is an optional runtime dependency, not a hard one, so the app installs and runs without it;
+  the import specifier is held in a variable so neither TypeScript nor Vite tries to resolve it.
+- `/healthz` returns 200 with DB latency, or 503 when Postgres is unreachable, so an orchestrator can
+  pull a broken instance out of rotation. `?deep=1` adds queue depth.
+- The public inbound webhook is rate-limited in two stages: **per-IP before the database lookup**
+  (so a flood of bogus tokens cannot become a flood of queries) and then per-shop. The buckets are
+  in-process, so with N instances the effective global limit is N × capacity — adequate for stopping
+  one bad actor from hammering an instance, but explicitly **not** a precise global quota.
+
+## 13. Staff attribution
+
+`Contact.ownerStaffId`, `Note.authorStaffId`, `Task.assigneeStaffId` and `MessageLog.sentByStaffId`
+existed in the schema but nothing ever populated them — a multi-staff CRM with no audit trail.
+
+The app uses **offline** Shopify tokens, so `session.onlineAccessInfo` is unavailable. The embedded
+session token JWT does carry the staff user id in `sub`, and the Shopify library verifies it before
+`authenticate.admin` resolves, so it cannot be spoofed by the client. `staffIdFromSessionToken()`
+reads it. Attribution is **best-effort**: `sessionToken` is absent outside embedded contexts, so
+every caller tolerates a null staff id rather than failing the write.
+
+## 14. GDPR data requests are delivered, not just logged
+
+`customers/data_request` previously assembled the customer's CRM data and `console.log`ged it. Since
+Shopify provides no callback for data requests, the merchant — who has 30 days to respond — was left
+with nothing to deliver. The obligation went unmet.
+
+The assembled export is now persisted as a `DataRequest` row and surfaced at `/app/privacy`, where
+staff can download it as JSON and mark it fulfilled. A row is written even when the shop holds no CRM
+data for that customer, because "we hold nothing about you" is itself a required response.
+
+`shop/redact` was also extended to delete `ProcessedOrder`, `MessageBatch`, `Job` and `DataRequest`
+rows, which the original transaction missed.
+
+## 15. Datasource: PostgreSQL only (supersedes §2)
+
+§2 claimed the schema could move to production by swapping "`DATABASE_URL` + `provider`". That was
+**not true**: the migration history was SQLite-dialect SQL, so `prisma migrate deploy` would fail
+against Postgres. Worse, the Dockerfile ran `prisma migrate deploy` against a SQLite file inside the
+container, so every redeploy would have destroyed all merchant data.
+
+`prisma/migrations/` has been regenerated as a single Postgres baseline and the provider is now
+`postgresql`. This was safe to do as a clean baseline **only because the app has never been
+deployed** — with live installs it would have required a real migration path instead.
+
+`app/db.server.ts` no longer falls back to `file:dev.sqlite` when `DATABASE_URL` is unset; it throws
+at boot. A silent fallback to throwaway storage is worse than a failed start.
+
+`docker-compose.yml` provides a matching local Postgres.
+
+## 16. The Docker image never built (supersedes §8)
+
+The Dockerfile ran `npm ci --omit=dev` and *then* `npm run build`. `vite` and `typescript` are
+required (non-optional) peer dependencies of `@react-router/dev` and live in `devDependencies`, so
+the build step had no bundler — the production image could not have been built successfully.
+
+It is now a multi-stage build: the full dependency tree in the builder stage, only compiled output
+plus production dependencies in the runtime stage, running as the non-root `node` user.
+`.dockerignore` was extended so `.env` and local SQLite state can never be baked into an image.
+
+## 17. Still outstanding
+
+- **Billing remains a stub** (§6). `requireActivePlan` returns `active: true`. Wire it up before
+  charging for the app.
+- **No live verification.** §8 still applies: OAuth install, embedded App Bridge session tokens,
+  live webhook HMAC delivery and the Brevo round trip have never run against a real store. Every
+  gate passed so far is local. See README "Pre-launch checklist".
+- `shopify.app.toml` still carries the placeholder `application_url = "https://example.com"`.

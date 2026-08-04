@@ -5,8 +5,15 @@ import { createReadableStreamFromReadable } from "@react-router/node";
 import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { startWorkerIfEnabled } from "./lib/jobs/worker.server";
+import { reportError } from "./lib/logger.server";
 
 export const streamTimeout = 5000;
+
+// Boot the background job worker alongside the web server. `startWorker` is idempotent, so dev
+// server module re-evaluation cannot spawn duplicates. Set RUN_JOB_WORKER=false to run the
+// worker as a separate process instead (see DECISIONS.md §11).
+startWorkerIfEnabled();
 
 export default async function handleRequest(
   request: Request,
@@ -45,7 +52,7 @@ export default async function handleRequest(
         },
         onError(error) {
           responseStatusCode = 500;
-          console.error(error);
+          void reportError("render.stream_error", error, { url: request.url });
         },
       }
     );

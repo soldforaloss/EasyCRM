@@ -18,6 +18,11 @@ export interface BrevoStatus {
   senderEmail: string | null;
   senderName: string | null;
   smsSender: string | null;
+  /** CAN-SPAM postal address. Email sending is blocked until this is set. */
+  businessAddress: string | null;
+  unsubscribeUrl: string | null;
+  /** Convenience flag for the UI — true when email sending is fully configured. */
+  emailComplianceReady: boolean;
 }
 
 export async function getOrCreateSettings(shop: string) {
@@ -39,6 +44,9 @@ export async function getBrevoStatus(shop: string): Promise<BrevoStatus> {
     senderEmail: s.brevoSenderEmail,
     senderName: s.brevoSenderName,
     smsSender: s.brevoSmsSender,
+    businessAddress: s.businessAddress,
+    unsubscribeUrl: s.unsubscribeUrl,
+    emailComplianceReady: Boolean(s.brevoSenderEmail && s.businessAddress?.trim()),
   };
 }
 
@@ -201,4 +209,47 @@ export async function updateSenderSettings(
       brevoSmsSender: input.smsSender?.trim() || null,
     },
   });
+}
+
+export interface ComplianceInput {
+  businessAddress?: string;
+  unsubscribeUrl?: string;
+}
+
+export interface ComplianceResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Save the marketing-compliance settings used by the email footer (see DECISIONS.md §10).
+ *
+ * The unsubscribe URL is validated to be http(s): a malformed value would silently produce a
+ * broken `List-Unsubscribe` header, which mailbox providers penalize.
+ */
+export async function updateComplianceSettings(
+  shop: string,
+  input: ComplianceInput,
+): Promise<ComplianceResult> {
+  const address = input.businessAddress?.trim() || null;
+  const rawUrl = input.unsubscribeUrl?.trim() || null;
+
+  if (rawUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return { ok: false, error: "Unsubscribe URL must be a full URL, e.g. https://yourshop.com/unsubscribe." };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { ok: false, error: "Unsubscribe URL must start with http:// or https://." };
+    }
+  }
+
+  await prisma.shopSettings.upsert({
+    where: { shop },
+    update: { businessAddress: address, unsubscribeUrl: rawUrl },
+    create: { shop, businessAddress: address, unsubscribeUrl: rawUrl },
+  });
+  return { ok: true };
 }

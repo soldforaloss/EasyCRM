@@ -20,6 +20,7 @@ import {
 } from "../lib/crm/activity.server";
 import { addTagToContact, removeTagFromContact } from "../lib/crm/tags.server";
 import { createTask, listTasks, setTaskStatus } from "../lib/crm/tasks.server";
+import { staffIdFromSessionToken } from "../lib/staff.server";
 import { fetchCustomerDetail } from "../lib/shopify/customers.server";
 import {
   buildMergeVarsMap,
@@ -32,6 +33,9 @@ import {
   ACTIVITY_TYPE_META,
   isActivityType,
   isChannel,
+  consentLabel,
+  consentTone,
+  hasMarketingConsent,
   type BadgeTone,
 } from "../lib/crm/constants";
 import {
@@ -101,6 +105,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       lastName: contact.lastName,
       email: contact.email,
       phone: contact.phone,
+      // Mirrored consent — the fallback the UI gates on when the live Shopify read is unavailable.
+      emailMarketingState: contact.emailMarketingState,
+      smsMarketingState: contact.smsMarketingState,
       stage: contact.lifecycleStage,
       source: contact.source,
       ordersCount: contact.ordersCount,
@@ -149,9 +156,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, sessionToken } = await authenticate.admin(request);
   const shop = session.shop;
   const contactId = params.id ?? "";
+  const staffId = staffIdFromSessionToken(sessionToken);
   const form = await request.formData();
   const intent = String(form.get("_action") ?? "");
 
@@ -161,7 +169,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         await setLifecycleStage(shop, contactId, String(form.get("stage") ?? ""));
         return { ok: true, toast: "Lifecycle stage updated." };
       case "addNote":
-        await addNote(shop, contactId, String(form.get("body") ?? ""));
+        await addNote(shop, contactId, String(form.get("body") ?? ""), staffId);
         return { ok: true, toast: "Note added." };
       case "editNote":
         await editNote(shop, String(form.get("noteId") ?? ""), String(form.get("body") ?? ""));
@@ -181,6 +189,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           title: String(form.get("title") ?? ""),
           contactId,
           dueAt: due ? new Date(`${due}T12:00:00`) : null,
+          assigneeStaffId: staffId,
         });
         return { ok: true, toast: "Task created." };
       }
@@ -199,10 +208,19 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           channel,
           subject: String(form.get("subject") ?? ""),
           body: String(form.get("body") ?? ""),
+          sentByStaffId: staffId,
         });
-        return outcome.ok
-          ? { ok: true, toast: "Message sent." }
-          : { ok: false, toast: outcome.error ?? "Send failed." };
+        if (outcome.ok) return { ok: true, toast: "Message sent." };
+        // A consent skip is an expected outcome, not an error — say so plainly rather than
+        // surfacing it as a failed send.
+        if (outcome.status === "SKIPPED" && outcome.skipReason === "NO_CONSENT") {
+          return {
+            ok: false,
+            toast:
+              "Not sent — this customer isn't subscribed to marketing in Shopify. The attempt was recorded on their timeline.",
+          };
+        }
+        return { ok: false, toast: outcome.error ?? "Send failed." };
       }
       default:
         return { ok: false, toast: "Unknown action." };
@@ -297,6 +315,13 @@ export default function ContactDetail() {
   const actionData = useActionData<typeof action>();
   const { contact, live, insights } = data;
   useActionToast(actionData);
+
+  // Marketing consent. The live Shopify value is authoritative when we have it; the mirrored
+  // value is the fallback, and is what the server-side gate will actually evaluate.
+  const emailConsentState = live?.emailMarketingState ?? contact.emailMarketingState;
+  const smsConsentState = live?.smsMarketingState ?? contact.smsMarketingState;
+  const emailAllowed = hasMarketingConsent(emailConsentState);
+  const smsAllowed = hasMarketingConsent(smsConsentState);
 
   const [tab, setTab] = useState<Tab>("Summary");
   const [activityFilter, setActivityFilter] = useState<string>("ALL");
@@ -549,11 +574,22 @@ export default function ContactDetail() {
           )}
 
           <s-section heading="Send a message">
+            {data.brevoConnected && !emailAllowed && !smsAllowed ? (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  This customer is not subscribed to email or SMS marketing in Shopify, so Easy CRM
+                  will not message them. If they re-subscribe, the status syncs back here
+                  automatically.
+                </s-paragraph>
+              </s-banner>
+            ) : null}
             {data.brevoConnected ? (
               <ComposeMessage
                 heading="Send a message"
-                canEmail={Boolean(contact.email)}
-                canSms={Boolean(contact.phone)}
+                // Consent gates the channel in the UI as well as on the server, so the merchant
+                // is never offered a send that would only be recorded as skipped.
+                canEmail={Boolean(contact.email) && emailAllowed}
+                canSms={Boolean(contact.phone) && smsAllowed}
                 previewVars={data.previewVars}
                 templates={data.templates}
                 actionValue="sendMessage"
@@ -657,11 +693,22 @@ export default function ContactDetail() {
           </s-section>
 
           <s-section heading="Send a message">
+            {data.brevoConnected && !emailAllowed && !smsAllowed ? (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  This customer is not subscribed to email or SMS marketing in Shopify, so Easy CRM
+                  will not message them. If they re-subscribe, the status syncs back here
+                  automatically.
+                </s-paragraph>
+              </s-banner>
+            ) : null}
             {data.brevoConnected ? (
               <ComposeMessage
                 heading="Send a message"
-                canEmail={Boolean(contact.email)}
-                canSms={Boolean(contact.phone)}
+                // Consent gates the channel in the UI as well as on the server, so the merchant
+                // is never offered a send that would only be recorded as skipped.
+                canEmail={Boolean(contact.email) && emailAllowed}
+                canSms={Boolean(contact.phone) && smsAllowed}
                 previewVars={data.previewVars}
                 templates={data.templates}
                 actionValue="sendMessage"
@@ -751,11 +798,15 @@ export default function ContactDetail() {
               </s-text>
               <s-text>
                 <s-text type="strong">Email marketing: </s-text>
-                {live?.emailMarketingState ?? "—"}
+                <s-badge tone={consentTone(emailConsentState)}>
+                  {consentLabel(emailConsentState)}
+                </s-badge>
               </s-text>
               <s-text>
                 <s-text type="strong">SMS marketing: </s-text>
-                {live?.smsMarketingState ?? "—"}
+                <s-badge tone={consentTone(smsConsentState)}>
+                  {consentLabel(smsConsentState)}
+                </s-badge>
               </s-text>
               {contact.source && (
                 <s-text>

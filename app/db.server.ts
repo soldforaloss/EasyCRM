@@ -1,12 +1,16 @@
 import { PrismaClient } from "@prisma/client";
 
-// The Prisma datasource reads `env("DATABASE_URL")` (so production can swap to Postgres/MySQL
-// by setting that one variable — see DECISIONS.md §2). The Prisma CLI loads `.env`, but the
-// generated client reads `process.env` directly at runtime and does not. This default keeps
-// `shopify app dev` working with the scaffold's local SQLite file when DATABASE_URL is unset,
-// using the exact same relative path string the scaffold hardcoded.
+// The Prisma datasource reads `env("DATABASE_URL")`. PostgreSQL is the only supported engine —
+// the migration history is Postgres-dialect SQL (see DECISIONS.md §2).
+//
+// There is deliberately NO fallback default here. A missing DATABASE_URL previously fell back to
+// a local SQLite file, which inside a container meant the app booted against throwaway storage
+// and discarded every merchant's data on redeploy. Failing at boot is the safe behavior.
 if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = "file:dev.sqlite";
+  throw new Error(
+    "DATABASE_URL is not set. Easy CRM requires a PostgreSQL connection string, e.g. " +
+      "postgresql://user:pass@host:5432/easycrm?schema=public",
+  );
 }
 
 declare global {

@@ -11,8 +11,35 @@ import type { ActionFunctionArgs } from "react-router";
 import { recordInboundFragment } from "../lib/crm/inbound.server";
 import { findShopByInboundToken } from "../lib/crm/settings.server";
 import { safeEqual } from "../lib/crypto.server";
+import { logger, reportError } from "../lib/logger.server";
+import { rateLimit } from "../lib/rate-limit.server";
 
 const MAX_BODY_BYTES = 256 * 1024;
+
+// Two-stage throttling. The per-IP bucket is checked BEFORE the database lookup, so an
+// unauthenticated flood of bogus tokens cannot turn into a flood of queries. The per-shop bucket
+// then bounds how much work one legitimate (or compromised) webhook URL can cause.
+// See DECISIONS.md §12.
+const IP_LIMIT = { capacity: 120, refillPerSecond: 2 };
+const SHOP_LIMIT = { capacity: 300, refillPerSecond: 5 };
+
+/** Best-effort client IP from the proxy headers; falls back to a shared bucket. */
+function clientIp(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return (
+    request.headers.get("cf-connecting-ip") ??
+    request.headers.get("x-real-ip") ??
+    "unknown"
+  );
+}
+
+function tooManyRequests(retryAfterSeconds: number): Response {
+  return new Response("Too many requests", {
+    status: 429,
+    headers: { "Retry-After": String(retryAfterSeconds) },
+  });
+}
 
 /** Pull the candidate secret from an Authorization header: `Bearer <secret>` or Basic (password). */
 function extractAuthSecret(header: string | null): string | null {
@@ -40,10 +67,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     return new Response("Method not allowed", { status: 405 });
   }
 
+  // Throttle by source address before touching the database.
+  const ipCheck = rateLimit(`inbound:ip:${clientIp(request)}`, IP_LIMIT);
+  if (!ipCheck.allowed) {
+    logger.warn("inbound.rate_limited", { scope: "ip", ip: clientIp(request) });
+    return tooManyRequests(ipCheck.retryAfterSeconds);
+  }
+
   // Resolve the shop from the URL token. Unknown/empty → 404 (don't confirm the URL scheme).
   const resolved = await findShopByInboundToken(params.token ?? "");
   if (!resolved) {
     return new Response("Not found", { status: 404 });
+  }
+
+  const shopCheck = rateLimit(`inbound:shop:${resolved.shop}`, SHOP_LIMIT);
+  if (!shopCheck.allowed) {
+    logger.warn("inbound.rate_limited", { scope: "shop", shop: resolved.shop });
+    return tooManyRequests(shopCheck.retryAfterSeconds);
   }
 
   // Optional shared secret (extra layer on top of the capability URL).
@@ -57,7 +97,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   // Size guard on a public endpoint.
   const raw = await request.text();
   if (raw.length > MAX_BODY_BYTES) {
-    console.warn(`[inbound] oversized body shop=${resolved.shop} bytes=${raw.length}`);
+    logger.warn("inbound.oversized_body", { shop: resolved.shop, bytes: raw.length });
     return new Response(null, { status: 200 });
   }
 
@@ -65,18 +105,21 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   try {
     body = raw ? JSON.parse(raw) : {};
   } catch {
-    console.warn(`[inbound] invalid JSON shop=${resolved.shop}`);
+    logger.warn("inbound.invalid_json", { shop: resolved.shop });
     return new Response(null, { status: 200 });
   }
 
   // Always 200 for authenticated requests (even on a per-message failure) so Brevo doesn't retry-storm.
   try {
     const result = await recordInboundFragment(resolved.shop, body);
-    console.log(
-      `[inbound] shop=${resolved.shop} matched=${result.matched} skipped=${result.skipped} dup=${result.duplicates}`,
-    );
+    logger.info("inbound.processed", {
+      shop: resolved.shop,
+      matched: result.matched,
+      skipped: result.skipped,
+      duplicates: result.duplicates,
+    });
   } catch (error) {
-    console.error(`[inbound] processing error shop=${resolved.shop}`, error);
+    void reportError("inbound.processing_error", error, { shop: resolved.shop });
   }
   return new Response(null, { status: 200 });
 };

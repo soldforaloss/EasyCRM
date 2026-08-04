@@ -155,7 +155,7 @@ export function isMessageDirection(v: unknown): v is MessageDirection {
 /* Message log status                                                  */
 /* ------------------------------------------------------------------ */
 
-export const MESSAGE_STATUSES = ["QUEUED", "SENT", "FAILED"] as const;
+export const MESSAGE_STATUSES = ["QUEUED", "SENT", "FAILED", "SKIPPED"] as const;
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
 export function isMessageStatus(v: unknown): v is MessageStatus {
@@ -168,7 +168,78 @@ export const MESSAGE_STATUS_META: Record<MessageStatus, { label: string; tone: B
   QUEUED: { label: "Queued", tone: "info" },
   SENT: { label: "Sent", tone: "success" },
   FAILED: { label: "Failed", tone: "critical" },
+  SKIPPED: { label: "Skipped", tone: "neutral" },
 };
+
+/* ------------------------------------------------------------------ */
+/* Skip reasons (why a send was suppressed before it was attempted)    */
+/* ------------------------------------------------------------------ */
+
+export const SKIP_REASONS = ["NO_CONSENT", "NO_ADDRESS", "INVALID_PHONE"] as const;
+export type SkipReason = (typeof SKIP_REASONS)[number];
+
+export const SKIP_REASON_META: Record<SkipReason, { label: string }> = {
+  NO_CONSENT: { label: "Not subscribed to marketing" },
+  NO_ADDRESS: { label: "No address on file" },
+  INVALID_PHONE: { label: "Phone number unusable" },
+};
+
+/* ------------------------------------------------------------------ */
+/* Marketing consent                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Shopify marketing states (CustomerEmailMarketingState / CustomerSmsMarketingState).
+ *
+ * ONLY `SUBSCRIBED` permits marketing contact. Everything else — including `PENDING`
+ * (double opt-in not yet confirmed) and `NOT_SUBSCRIBED` — does not. A NULL/unknown value means
+ * the mirror has never been synced and is likewise treated as no consent: this gate fails
+ * CLOSED by design, because the cost of a wrong "allow" is a CAN-SPAM/TCPA/GDPR violation for
+ * the merchant, while the cost of a wrong "deny" is one unsent message.
+ *
+ * See DECISIONS.md §10.
+ */
+export const CONSENT_SUBSCRIBED = "SUBSCRIBED";
+
+/** True only when this state grants permission to send marketing messages. */
+export function hasMarketingConsent(state: string | null | undefined): boolean {
+  return state === CONSENT_SUBSCRIBED;
+}
+
+/** Human-readable consent label for the UI. */
+export function consentLabel(state: string | null | undefined): string {
+  if (!state) return "Unknown";
+  return state
+    .toLowerCase()
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** Badge tone for a consent state — green only when sending is actually permitted. */
+export function consentTone(state: string | null | undefined): BadgeTone {
+  if (hasMarketingConsent(state)) return "success";
+  if (state === "PENDING") return "caution";
+  return "critical";
+}
+
+/** The consent field that governs a given channel. */
+export function consentStateFor(
+  channel: Channel,
+  contact: { emailMarketingState?: string | null; smsMarketingState?: string | null },
+): string | null {
+  return (
+    (channel === "EMAIL" ? contact.emailMarketingState : contact.smsMarketingState) ?? null
+  );
+}
+
+/** True when `contact` may be sent a marketing message on `channel`. */
+export function canReceive(
+  channel: Channel,
+  contact: { emailMarketingState?: string | null; smsMarketingState?: string | null },
+): boolean {
+  return hasMarketingConsent(consentStateFor(channel, contact));
+}
 
 /* ------------------------------------------------------------------ */
 /* Spend tiers (numeric buckets over the cached Contact.amountSpent)   */

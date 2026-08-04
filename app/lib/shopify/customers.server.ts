@@ -44,7 +44,23 @@ export interface MirrorCustomerNode {
   lastName: string | null;
   email: string | null;
   phone: string | null;
+  /** Shopify CustomerEmailMarketingState — mirrored so the send gate can enforce consent. */
+  emailMarketingState: string | null;
+  /** Shopify CustomerSmsMarketingState — mirrored so the send gate can enforce consent. */
+  smsMarketingState: string | null;
   numberOfOrders: string; // GraphQL returns UnsignedInt64 as string
+  amountSpent: { amount: string; currencyCode: string } | null;
+  createdAt: string;
+}
+
+/** Raw GraphQL shape — marketing consent is nested, so it is flattened into MirrorCustomerNode. */
+interface RawMirrorCustomerNode {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  defaultEmailAddress: { emailAddress: string | null; marketingState: string | null } | null;
+  defaultPhoneNumber: { phoneNumber: string | null; marketingState: string | null } | null;
+  numberOfOrders: string;
   amountSpent: { amount: string; currencyCode: string } | null;
   createdAt: string;
 }
@@ -52,7 +68,7 @@ export interface MirrorCustomerNode {
 interface CustomersPageData {
   customers: {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
-    nodes: MirrorCustomerNode[];
+    nodes: RawMirrorCustomerNode[];
   };
 }
 
@@ -64,14 +80,29 @@ const CUSTOMERS_PAGE_QUERY = `#graphql
         id
         firstName
         lastName
-        email
-        phone
+        defaultEmailAddress { emailAddress marketingState }
+        defaultPhoneNumber { phoneNumber marketingState }
         numberOfOrders
         amountSpent { amount currencyCode }
         createdAt
       }
     }
   }`;
+
+function toMirrorNode(c: RawMirrorCustomerNode): MirrorCustomerNode {
+  return {
+    id: c.id,
+    firstName: c.firstName,
+    lastName: c.lastName,
+    email: c.defaultEmailAddress?.emailAddress ?? null,
+    phone: c.defaultPhoneNumber?.phoneNumber ?? null,
+    emailMarketingState: c.defaultEmailAddress?.marketingState ?? null,
+    smsMarketingState: c.defaultPhoneNumber?.marketingState ?? null,
+    numberOfOrders: c.numberOfOrders,
+    amountSpent: c.amountSpent,
+    createdAt: c.createdAt,
+  };
+}
 
 /** Async generator yielding pages of customers for backfill. */
 export async function* iterateCustomers(
@@ -86,7 +117,7 @@ export async function* iterateCustomers(
       CUSTOMERS_PAGE_QUERY,
       { first: pageSize, after },
     );
-    yield data.customers.nodes;
+    yield data.customers.nodes.map(toMirrorNode);
     if (!data.customers.pageInfo.hasNextPage) break;
     after = data.customers.pageInfo.endCursor;
     if (!after) break;
@@ -279,6 +310,9 @@ export interface CustomerSyncFields {
   currencyCode: string | null;
   numberOfOrders: number;
   lastOrderAt: string | null;
+  /** Current marketing consent — refreshed on every customers/* webhook so opt-outs land fast. */
+  emailMarketingState: string | null;
+  smsMarketingState: string | null;
 }
 
 interface CustomerSyncData {
@@ -286,6 +320,8 @@ interface CustomerSyncData {
     numberOfOrders: string;
     amountSpent: { amount: string; currencyCode: string } | null;
     lastOrder: { createdAt: string } | null;
+    defaultEmailAddress: { marketingState: string | null } | null;
+    defaultPhoneNumber: { marketingState: string | null } | null;
   } | null;
 }
 
@@ -295,10 +331,12 @@ const CUSTOMER_SYNC_QUERY = `#graphql
       numberOfOrders
       amountSpent { amount currencyCode }
       lastOrder { createdAt }
+      defaultEmailAddress { marketingState }
+      defaultPhoneNumber { marketingState }
     }
   }`;
 
-/** Fetch authoritative spend/orders/last-order for one customer (used by the webhook refresh). */
+/** Fetch authoritative spend/orders/last-order/consent for one customer (webhook refresh). */
 export async function fetchCustomerSyncFields(
   admin: AdminGraphqlClient,
   customerGid: string,
@@ -313,6 +351,8 @@ export async function fetchCustomerSyncFields(
     currencyCode: data.customer.amountSpent?.currencyCode ?? null,
     numberOfOrders: Number.parseInt(data.customer.numberOfOrders, 10) || 0,
     lastOrderAt: data.customer.lastOrder?.createdAt ?? null,
+    emailMarketingState: data.customer.defaultEmailAddress?.marketingState ?? null,
+    smsMarketingState: data.customer.defaultPhoneNumber?.marketingState ?? null,
   };
 }
 

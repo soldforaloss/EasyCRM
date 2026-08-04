@@ -16,6 +16,7 @@ import {
   type TaskWithContact,
 } from "../lib/crm/tasks.server";
 import { displayName, formatDate } from "../lib/format";
+import { staffIdFromSessionToken } from "../lib/staff.server";
 import { TaskStatusBadge } from "../components/badges";
 import { ConfirmAction } from "../components/confirm";
 import { useActionToast } from "../lib/use-action-toast";
@@ -50,7 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, sessionToken } = await authenticate.admin(request);
   const shop = session.shop;
   const form = await request.formData();
   const intent = String(form.get("_action") ?? "");
@@ -62,6 +63,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           title: String(form.get("title") ?? ""),
           notes: String(form.get("notes") ?? "") || null,
           dueAt: due ? new Date(`${due}T12:00:00`) : null,
+          assigneeStaffId: staffIdFromSessionToken(sessionToken),
         });
         return { ok: true, toast: "Task created." };
       }

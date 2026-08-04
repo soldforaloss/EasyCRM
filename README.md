@@ -19,10 +19,25 @@ shows live order history, and sends BYOK email + SMS via **Brevo**. See
 | `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` | yes | Provided by the Shopify CLI (`shopify app dev`) / your host. |
 | `SHOPIFY_APP_URL` | yes | App URL / tunnel URL (set by the CLI in dev). |
 | `SCOPES` | optional | Falls back to `shopify.app.toml` (`read_customers,read_orders`). |
-| `DATABASE_URL` | yes | Prisma datasource. Dev defaults to `file:dev.sqlite`; set a Postgres/MySQL URL in prod. |
+| `DATABASE_URL` | yes | **PostgreSQL** connection string. No default — the app throws at boot without it. |
 | `ENCRYPTION_KEY` | yes | 32-byte secret (64 hex chars or 32-byte base64) used to AES-256-GCM encrypt the Brevo API key at rest. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
+| `SENTRY_DSN` | optional | Enables error reporting. Requires `npm i @sentry/node`; without it the app logs and continues. |
+| `LOG_LEVEL` | optional | `debug` \| `info` \| `warn` \| `error`. Defaults to `info` in production. |
+| `RUN_JOB_WORKER` | optional | Set `false` to disable the in-process background worker on an instance. |
 
 Copy `.env.example` to `.env` for local development. **Never commit real secrets.**
+
+> **PostgreSQL is required.** The migration history is Postgres-dialect SQL — SQLite and MySQL are
+> not supported. See `DECISIONS.md` §15.
+
+### Local setup
+
+```shell
+docker compose up -d db    # local Postgres on :5432
+cp .env.example .env       # then fill in ENCRYPTION_KEY
+npx prisma migrate deploy  # apply the schema
+npm run dev                # shopify app dev (embedded)
+```
 
 ### Run, test, migrate
 
@@ -31,9 +46,42 @@ npm run dev          # shopify app dev (embedded)
 npm run setup        # prisma generate && prisma migrate deploy (prod)
 npx prisma migrate dev   # create/apply a migration in dev
 npm run typecheck    # react-router typegen && tsc --noEmit
-npm run test         # vitest unit tests (crypto, phone, merge, Brevo client, ...)
+npm run test         # vitest unit tests (consent gate, crypto, queue, phone, merge, ...)
+npm run lint         # eslint
 npm run build        # production build
 ```
+
+### Marketing consent
+
+Easy CRM only messages customers whose Shopify marketing state is `SUBSCRIBED`. Everyone else is
+skipped and recorded as `SKIPPED / NO_CONSENT` on their timeline — this is enforced server-side in
+`sendOneToContact()` and cannot be bypassed by a caller. Email sending additionally requires a
+business postal address in Settings (CAN-SPAM). See `DECISIONS.md` §10.
+
+### Background jobs
+
+Bulk sends and the install backfill run as `Job` rows drained by an in-process worker
+(`app/lib/jobs/`). This requires a long-running process — the provided Dockerfile qualifies; a
+freeze-between-requests serverless platform does not. See `DECISIONS.md` §11.
+
+Queue depth: `GET /healthz?deep=1`.
+
+### Pre-launch checklist
+
+Everything below is verified locally (`typecheck`, `lint`, `test`, `build` all pass). **None of it
+has run against a real Shopify store** — do this before launch:
+
+1. Set a real `application_url` + `redirect_urls` in `shopify.app.toml` (currently `https://example.com`).
+2. Provision Postgres; run `npx prisma migrate deploy`; confirm `/healthz` returns 200.
+3. Install on a development store and verify: OAuth completes promptly, the backfill job drains,
+   and the embedded app loads.
+4. Trigger each of the 8 webhook topics and confirm HMAC validation passes and the mirror updates.
+5. Connect Brevo, set the sender **and** business address, send a test email — confirm the postal
+   address, unsubscribe link and `List-Unsubscribe` header arrive in the received message.
+6. Send to a mixed group and confirm non-subscribed contacts are skipped, not messaged.
+7. Verify a `customers/data_request` lands at `/app/privacy` and downloads.
+8. Enable billing (`DECISIONS.md` §6) if the app will be paid.
+9. Run through Shopify's App Store review checklist.
 
 ### Enabling billing later
 
@@ -113,6 +161,11 @@ For more information on the Shopify Dev MCP please read [the documentation](http
 ## Deployment
 
 ### Application Storage
+
+> **Easy CRM note:** this app uses **PostgreSQL only**. The generic template guidance below about
+> swapping the datasource provider does **not** apply — the migration history in
+> `prisma/migrations/` is Postgres-dialect SQL, and changing `provider` would require regenerating
+> it from scratch. See `DECISIONS.md` §15.
 
 This template uses [Prisma](https://www.prisma.io/) to store session data, by default using an [SQLite](https://www.sqlite.org/index.html) database.
 The database is defined as a Prisma schema in `prisma/schema.prisma`.
