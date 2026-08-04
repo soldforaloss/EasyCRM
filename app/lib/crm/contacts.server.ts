@@ -27,14 +27,13 @@ function buildWhere(shop: string, params: ContactListParams): Prisma.ContactWher
 
   const search = params.search?.trim();
   if (search) {
-    // NOTE: `contains` is case-insensitive on SQLite (dev). For Postgres prod, add
-    // `mode: "insensitive"` — see DECISIONS.md §2.
+    // PostgreSQL string filters are case-sensitive unless explicitly configured otherwise.
     and.push({
       OR: [
-        { firstName: { contains: search } },
-        { lastName: { contains: search } },
-        { email: { contains: search } },
-        { phone: { contains: search } },
+        { firstName: { contains: search, mode: "insensitive" } },
+        { lastName: { contains: search, mode: "insensitive" } },
+        { email: { contains: search, mode: "insensitive" } },
+        { phone: { contains: search, mode: "insensitive" } },
       ],
     });
   }
@@ -147,9 +146,9 @@ export async function getContactByShopifyId(
 }
 
 /**
- * Find a contact by email within a shop (case-insensitive on SQLite; for Postgres add
- * `mode: "insensitive"` per DECISIONS.md §2). Uses the `(shop, email)` index. `findFirst` because
- * the index is non-unique — pick the most recently updated on a collision. Used for inbound matching.
+ * Find a contact by email within a shop using an exact PostgreSQL comparison. Uses the
+ * `(shop, email)` index. `findFirst` because the index is non-unique — pick the most recently
+ * updated on a collision. Used for inbound matching.
  */
 export async function findContactByEmail(
   shop: string,

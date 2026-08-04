@@ -4,7 +4,6 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { countContacts, countContactsSince } from "../lib/crm/contacts.server";
 import { countOpenTasks, groupTasks, listTasks } from "../lib/crm/tasks.server";
-import { getBrevoStatus } from "../lib/crm/settings.server";
 import { listRecentActivity } from "../lib/crm/activity.server";
 import { ACTIVITY_TYPE_META, isActivityType } from "../lib/crm/constants";
 import { displayName, formatDate, formatRelativeDay } from "../lib/format";
@@ -14,15 +13,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = session.shop;
   const since = new Date(Date.now() - 30 * 86_400_000);
 
-  const [totalContacts, newContacts, openTasks, brevo, recent, openTaskList] =
-    await Promise.all([
-      countContacts(shop),
-      countContactsSince(shop, since),
-      countOpenTasks(shop),
-      getBrevoStatus(shop),
-      listRecentActivity(shop, 8),
-      listTasks(shop, { status: "OPEN" }),
-    ]);
+  const [totalContacts, newContacts, openTasks, recent, openTaskList] = await Promise.all([
+    countContacts(shop),
+    countContactsSince(shop, since),
+    countOpenTasks(shop),
+    listRecentActivity(shop, 8),
+    listTasks(shop, { status: "OPEN" }),
+  ]);
 
   const grouped = groupTasks(openTaskList);
   const tasksDue = [
@@ -34,7 +31,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     totalContacts,
     newContacts,
     openTasks,
-    brevoConnected: brevo.connected,
     recent: recent.map((a) => ({
       id: a.id,
       type: a.type,
@@ -81,7 +77,7 @@ function activityLabel(type: string): string {
 }
 
 export default function Dashboard() {
-  const { totalContacts, newContacts, openTasks, brevoConnected, recent, tasksDue } =
+  const { totalContacts, newContacts, openTasks, recent, tasksDue } =
     useLoaderData<typeof loader>();
 
   return (
@@ -89,17 +85,6 @@ export default function Dashboard() {
       <s-button slot="primary-action" href="/app/contacts" variant="primary">
         View contacts
       </s-button>
-
-      {!brevoConnected && (
-        <s-banner tone="info" heading="Connect Brevo to start messaging">
-          <s-paragraph>
-            Add your Brevo API key in Settings to send email and SMS to your customers.
-          </s-paragraph>
-          <s-button slot="primary-action" href="/app/settings">
-            Go to Settings
-          </s-button>
-        </s-banner>
-      )}
 
       <s-section heading="Overview">
         <s-grid gridTemplateColumns="1fr 1fr 1fr" gap="base">
