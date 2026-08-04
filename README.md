@@ -35,6 +35,10 @@ Copy `.env.example` to `.env` for local development. **Never commit real secrets
 > **PostgreSQL is required.** The migration history is Postgres-dialect SQL — SQLite and MySQL are
 > not supported. See `DECISIONS.md` §15.
 
+Deploying to a real host? Follow [`DEPLOY.md`](./DEPLOY.md) — the image is boot-verified and the
+remaining steps (Fly/any Docker host, Shopify URLs, Protected Customer Data) are a copy-paste
+sequence.
+
 ### Local setup
 
 ```shell
