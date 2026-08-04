@@ -80,6 +80,13 @@ export type VisitSource = (typeof VISIT_SOURCES)[number];
 export const CONTACT_PREFERENCE_KEYS = ["SHIRT_SIZE", "SHOE_SIZE"] as const;
 export type ContactPreferenceKey = (typeof CONTACT_PREFERENCE_KEYS)[number];
 
+export function isContactPreferenceKey(v: unknown): v is ContactPreferenceKey {
+  return (
+    typeof v === "string" &&
+    (CONTACT_PREFERENCE_KEYS as readonly string[]).includes(v)
+  );
+}
+
 export const CONTACT_PREFERENCE_SOURCES = ["DERIVED", "MANUAL"] as const;
 export type ContactPreferenceSource = (typeof CONTACT_PREFERENCE_SOURCES)[number];
 

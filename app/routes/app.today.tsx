@@ -18,6 +18,10 @@ import { dateStringInTz } from "../lib/timezone";
 import { displayName, formatDate, formatMoney } from "../lib/format";
 import { StageBadge } from "../components/badges";
 import { useActionToast } from "../lib/use-action-toast";
+import {
+  CONTACT_PREFERENCE_KEYS,
+  isContactPreferenceKey,
+} from "../lib/crm/constants";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, sessionToken } = await authenticate.admin(request);
@@ -91,8 +95,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ]);
 
   const orderGids = visits.flatMap((visit) => (visit.orderGid ? [visit.orderGid] : []));
-  const contactIds = visits.map((visit) => visit.contactId);
-  const [orders, contactLocations] = await Promise.all([
+  const contactIds = [...new Set(visits.map((visit) => visit.contactId))];
+  const [orders, contactLocations, preferences] = await Promise.all([
     orderGids.length > 0
       ? prisma.processedOrder.findMany({
           where: { shop, orderGid: { in: orderGids } },
@@ -115,12 +119,32 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           select: { contactId: true, ordersCount: true },
         })
       : Promise.resolve([]),
+    contactIds.length > 0
+      ? prisma.contactPreference.findMany({
+          where: { shop, contactId: { in: contactIds } },
+          select: { contactId: true, key: true, value: true, source: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   const ordersByGid = new Map(orders.map((order) => [order.orderGid, order]));
   const ordersCountByContact = new Map(
     contactLocations.map((row) => [row.contactId, row.ordersCount]),
   );
+  const preferencesByContact = new Map<string, Map<string, string>>();
+  for (const preference of preferences) {
+    if (
+      !isContactPreferenceKey(preference.key) ||
+      (preference.source !== "DERIVED" && preference.source !== "MANUAL")
+    ) {
+      continue;
+    }
+    const byKey = preferencesByContact.get(preference.contactId) ?? new Map();
+    if (!byKey.has(preference.key) || preference.source === "MANUAL") {
+      byKey.set(preference.key, preference.value);
+    }
+    preferencesByContact.set(preference.contactId, byKey);
+  }
   const visitRows = visits
     .map((visit) => {
       const order = visit.orderGid ? ordersByGid.get(visit.orderGid) : undefined;
@@ -136,6 +160,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         currencyCode: order?.currencyCode ?? null,
         orderName: order?.orderName ?? null,
         firstVisitHere: ordersCountByContact.get(visit.contactId) === 1,
+        preferences: CONTACT_PREFERENCE_KEYS.flatMap((key) => {
+          const value = preferencesByContact.get(visit.contactId)?.get(key);
+          return value ? [{ key, value }] : [];
+        }),
       };
     })
     .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
@@ -300,6 +328,7 @@ export default function TodayPage() {
                   <s-table-header>Time</s-table-header>
                   <s-table-header>Customer</s-table-header>
                   <s-table-header>Stage</s-table-header>
+                  <s-table-header>Sizes</s-table-header>
                   <s-table-header>Order</s-table-header>
                   <s-table-header>Total</s-table-header>
                   <s-table-header>Visit</s-table-header>
@@ -326,6 +355,20 @@ export default function TodayPage() {
                       </s-table-cell>
                       <s-table-cell>
                         <StageBadge stage={visit.lifecycleStage} />
+                      </s-table-cell>
+                      <s-table-cell>
+                        {visit.preferences.length > 0 ? (
+                          <s-stack direction="inline" gap="small-200">
+                            {visit.preferences.map((preference) => (
+                              <s-badge key={preference.key} tone="info">
+                                {preference.key === "SHIRT_SIZE" ? "Shirt" : "Shoe"}{" "}
+                                {preference.value}
+                              </s-badge>
+                            ))}
+                          </s-stack>
+                        ) : (
+                          "—"
+                        )}
                       </s-table-cell>
                       <s-table-cell>{visit.orderName ?? "—"}</s-table-cell>
                       <s-table-cell>

@@ -31,12 +31,15 @@ import { listTemplates } from "../lib/crm/templates.server";
 import { getBrevoStatus } from "../lib/crm/settings.server";
 import {
   ACTIVITY_TYPE_META,
+  CONTACT_PREFERENCE_KEYS,
   isActivityType,
   isChannel,
+  isContactPreferenceKey,
   consentLabel,
   consentTone,
   hasMarketingConsent,
   type BadgeTone,
+  type ContactPreferenceKey,
 } from "../lib/crm/constants";
 import {
   displayName,
@@ -60,6 +63,10 @@ import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 import prisma from "../db.server";
 import { dateStringInTz } from "../lib/timezone";
 import { logOutreach } from "../lib/crm/outreach.server";
+import {
+  deleteManualPreference,
+  saveManualPreference,
+} from "../lib/crm/preferences.server";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -91,6 +98,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     settings,
     candidateVisits,
     contactLocations,
+    preferences,
     locations,
     lastOutreach,
   ] =
@@ -119,6 +127,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         where: { shop, contactId: contact.id },
         orderBy: [{ ordersCount: "desc" }, { lastOrderAt: "desc" }],
         select: { locationId: true, ordersCount: true },
+      }),
+      prisma.contactPreference.findMany({
+        where: { shop, contactId: contact.id },
+        select: { key: true, value: true, source: true, sampleCount: true },
       }),
       prisma.location.findMany({
         where: { shop },
@@ -218,6 +230,22 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       locationName: locationNames.get(row.locationId) ?? "Unknown store",
       ordersCount: row.ordersCount,
     })),
+    preferences: CONTACT_PREFERENCE_KEYS.map((key) => {
+      const derived = preferences.find(
+        (preference) => preference.key === key && preference.source === "DERIVED",
+      );
+      const manual = preferences.find(
+        (preference) => preference.key === key && preference.source === "MANUAL",
+      );
+      return {
+        key,
+        derived: derived
+          ? { value: derived.value, sampleCount: derived.sampleCount }
+          : null,
+        manualValue: manual?.value ?? null,
+        effectiveValue: manual?.value ?? derived?.value ?? null,
+      };
+    }),
     lastOutreach,
     previewVars: varsMap.get(contact.id) ?? {},
     shopifyCustomerUrl: `https://${shop}/admin/customers/${numericId}`,
@@ -248,6 +276,24 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           staffId,
         });
         return { ok: true, toast: "Outreach logged." };
+      case "savePreference": {
+        const key = String(form.get("key") ?? "");
+        const value = String(form.get("value") ?? "").trim();
+        if (!isContactPreferenceKey(key)) {
+          return { ok: false, toast: "Choose a valid preference." };
+        }
+        if (!value) return { ok: false, toast: "Enter a preference value." };
+        await saveManualPreference(shop, contactId, key, value);
+        return { ok: true, toast: "Size preference saved." };
+      }
+      case "deletePreference": {
+        const key = String(form.get("key") ?? "");
+        if (!isContactPreferenceKey(key)) {
+          return { ok: false, toast: "Choose a valid preference." };
+        }
+        await deleteManualPreference(shop, contactId, key);
+        return { ok: true, toast: "Manual size override cleared." };
+      }
       case "editNote":
         await editNote(shop, String(form.get("noteId") ?? ""), String(form.get("body") ?? ""));
         return { ok: true, toast: "Note updated." };
@@ -321,6 +367,10 @@ function financialTone(status: string | null): BadgeTone {
     default:
       return "neutral";
   }
+}
+
+function preferenceLabel(key: ContactPreferenceKey): string {
+  return key === "SHIRT_SIZE" ? "Shirt" : "Shoe";
 }
 
 function describeTimeline(item: {
@@ -458,6 +508,107 @@ function LogOutreachCard() {
   );
 }
 
+interface PreferenceView {
+  key: ContactPreferenceKey;
+  derived: { value: string; sampleCount: number } | null;
+  manualValue: string | null;
+  effectiveValue: string | null;
+}
+
+function PreferenceEditor({
+  contactId,
+  preferences,
+}: {
+  contactId: string;
+  preferences: PreferenceView[];
+}) {
+  const fetcher = useFetcher<{ ok: boolean; toast?: string }>();
+  const [key, setKey] = useState<ContactPreferenceKey>("SHIRT_SIZE");
+  const selected = preferences.find((preference) => preference.key === key);
+  const [value, setValue] = useState(selected?.manualValue ?? "");
+  const busy = fetcher.state !== "idle";
+  useActionToast(fetcher.data);
+
+  useEffect(() => {
+    setValue(selected?.manualValue ?? "");
+  }, [contactId, key, selected?.manualValue]);
+
+  function chooseKey(next: string) {
+    if (!isContactPreferenceKey(next)) return;
+    setKey(next);
+  }
+
+  function save() {
+    const nextValue = value.trim();
+    if (!nextValue) return;
+    fetcher.submit(
+      { _action: "savePreference", key, value: nextValue },
+      { method: "post" },
+    );
+  }
+
+  function clear() {
+    fetcher.submit({ _action: "deletePreference", key }, { method: "post" });
+  }
+
+  return (
+    <s-stack direction="block" gap="base">
+      <s-stack direction="block" gap="small-200">
+        {preferences.map((preference) => (
+          <s-text key={preference.key}>
+            <s-text type="strong">{preferenceLabel(preference.key)}: </s-text>
+            {preference.derived
+              ? `${preference.derived.value} (from ${preference.derived.sampleCount} purchase${
+                  preference.derived.sampleCount === 1 ? "" : "s"
+                })`
+              : "No derived size yet"}
+            {preference.manualValue
+              ? ` - manual override: ${preference.manualValue}`
+              : ""}
+          </s-text>
+        ))}
+      </s-stack>
+
+      <s-select
+        label="Preference"
+        value={key}
+        onChange={(event) =>
+          chooseKey((event.target as HTMLSelectElement | null)?.value ?? "")
+        }
+      >
+        {CONTACT_PREFERENCE_KEYS.map((preferenceKey) => (
+          <s-option key={preferenceKey} value={preferenceKey}>
+            {preferenceLabel(preferenceKey)} size
+          </s-option>
+        ))}
+      </s-select>
+      <s-text-field
+        label="Manual override"
+        value={value}
+        placeholder={selected?.derived?.value ?? "Enter a size"}
+        onInput={(event) =>
+          setValue((event.target as HTMLInputElement | null)?.value ?? "")
+        }
+      />
+      <s-stack direction="inline" gap="small-200">
+        <s-button
+          variant="primary"
+          onClick={save}
+          {...(busy || !value.trim() ? { disabled: true } : {})}
+          {...(busy ? { loading: true } : {})}
+        >
+          Save override
+        </s-button>
+        {selected?.manualValue ? (
+          <s-button onClick={clear} {...(busy ? { disabled: true } : {})}>
+            Clear override
+          </s-button>
+        ) : null}
+      </s-stack>
+    </s-stack>
+  );
+}
+
 export default function ContactDetail() {
   const data = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -579,6 +730,17 @@ export default function ContactDetail() {
               ))}
             </s-stack>
           )}
+          {data.preferences.some((preference) => preference.effectiveValue) ? (
+            <s-stack direction="inline" gap="small-200" justifyContent="center">
+              {data.preferences.map((preference) =>
+                preference.effectiveValue ? (
+                  <s-badge key={preference.key} tone="info">
+                    {preferenceLabel(preference.key)} {preference.effectiveValue}
+                  </s-badge>
+                ) : null,
+              )}
+            </s-stack>
+          ) : null}
         </s-stack>
       </s-section>
 
@@ -802,7 +964,6 @@ export default function ContactDetail() {
                 <s-table-body>
                   {allOrders.map((o) => {
                     const oid = o.id.split("/").pop();
-                    const itemCount = o.lineItems.reduce((n, li) => n + (li.quantity || 0), 0);
                     return (
                       <s-table-row key={o.id}>
                         <s-table-cell>
@@ -817,7 +978,21 @@ export default function ContactDetail() {
                           </s-badge>
                         </s-table-cell>
                         <s-table-cell>{o.displayFulfillmentStatus ?? "—"}</s-table-cell>
-                        <s-table-cell>{itemCount || "—"}</s-table-cell>
+                        <s-table-cell>
+                          {o.lineItems.length > 0 ? (
+                            <s-stack direction="block" gap="small-500">
+                              {o.lineItems.map((item, index) => (
+                                <s-text key={`${item.sku ?? item.title}-${index}`}>
+                                  {item.title}
+                                  {item.variantTitle ? ` - ${item.variantTitle}` : ""}
+                                  {item.quantity > 1 ? ` x${item.quantity}` : ""}
+                                </s-text>
+                              ))}
+                            </s-stack>
+                          ) : (
+                            "—"
+                          )}
+                        </s-table-cell>
                         <s-table-cell>
                           {o.totalPriceSet
                             ? formatMoney(
@@ -998,6 +1173,10 @@ export default function ContactDetail() {
                 </s-text>
               )}
             </s-stack>
+          </s-section>
+
+          <s-section heading="Preferences">
+            <PreferenceEditor contactId={contact.id} preferences={data.preferences} />
           </s-section>
 
           {live?.defaultAddress?.formatted && (

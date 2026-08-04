@@ -8,9 +8,14 @@ Visit the [`shopify.dev` documentation](https://shopify.dev/docs/api/shopify-app
 
 ## Easy CRM (this app)
 
-Easy CRM is an embedded Shopify CRM that mirrors customers locally for fast list/search,
-shows live order history, and sends BYOK email + SMS via **Brevo**. See
-[`DECISIONS.md`](./DECISIONS.md) for architecture decisions and the build prompt for full scope.
+Easy CRM is an embedded Shopify clienteling CRM. Its in-store pilot workflow centers on the
+**Today** view: staff choose their store, see customers attached to today's POS sales, review
+purchase history and size preferences, then log follow-up outreach. Visits depend on staff
+attaching the customer to the Shopify POS order; guest sales and non-purchase walk-ins cannot be
+identified. The store selector persists a home store when Shopify supplies a verified staff id.
+
+The app also mirrors customers locally for fast list/search, shows live order history, and supports
+BYOK email + SMS via **Brevo**. See [`DECISIONS.md`](./DECISIONS.md) for architecture decisions.
 
 ### Required environment variables
 
@@ -72,16 +77,20 @@ Everything below is verified locally (`typecheck`, `lint`, `test`, `build` all p
 has run against a real Shopify store** — do this before launch:
 
 1. Set a real `application_url` + `redirect_urls` in `shopify.app.toml` (currently `https://example.com`).
-2. Provision Postgres; run `npx prisma migrate deploy`; confirm `/healthz` returns 200.
-3. Install on a development store and verify: OAuth completes promptly, the backfill job drains,
+2. Deploy the `read_locations` scope and re-authenticate existing installs so Shopify grants it.
+3. Obtain the required Protected Customer Data grant in the Shopify Partner Dashboard.
+4. Provision Postgres; run `npx prisma migrate deploy`; confirm `/healthz` returns 200.
+5. Install on a development store and verify: OAuth completes promptly, the backfill job drains,
    and the embedded app loads.
-4. Trigger each of the 8 webhook topics and confirm HMAC validation passes and the mirror updates.
-5. Connect Brevo, set the sender **and** business address, send a test email — confirm the postal
+6. Train store staff to attach customers to every eligible Shopify POS sale; confirm the sale
+   appears in the correct store's Today view.
+7. Trigger each of the 8 webhook topics and confirm HMAC validation passes and the mirror updates.
+8. Connect Brevo, set the sender **and** business address, send a test email — confirm the postal
    address, unsubscribe link and `List-Unsubscribe` header arrive in the received message.
-6. Send to a mixed group and confirm non-subscribed contacts are skipped, not messaged.
-7. Verify a `customers/data_request` lands at `/app/privacy` and downloads.
-8. Enable billing (`DECISIONS.md` §6) if the app will be paid.
-9. Run through Shopify's App Store review checklist.
+9. Send to a mixed group and confirm non-subscribed contacts are skipped, not messaged.
+10. Verify a `customers/data_request` lands at `/app/privacy` and downloads.
+11. Enable billing (`DECISIONS.md` §6) if the app will be paid.
+12. Run through Shopify's App Store review checklist.
 
 ### Enabling billing later
 

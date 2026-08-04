@@ -39,6 +39,13 @@ vi.mock("../shopify/customers.server", () => ({
   fetchCustomerSyncFields: syncFieldsMock,
 }));
 
+const { recomputePreferencesMock } = vi.hoisted(() => ({
+  recomputePreferencesMock: vi.fn(),
+}));
+vi.mock("./preferences.server", () => ({
+  recomputeDerivedPreferences: recomputePreferencesMock,
+}));
+
 import {
   deleteContactFromWebhook,
   recordOrderAndRefresh,
@@ -174,6 +181,7 @@ describe("recordOrderFromWebhook", () => {
     expect(upd.data.amountSpent).toEqual({ increment: 50 });
     expect(prismaMock.activity.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.activity.create.mock.calls[0][0].data.type).toBe("ORDER_PLACED");
+    expect(recomputePreferencesMock).toHaveBeenCalledWith("s", "c1", prismaMock);
   });
 
   it("is idempotent: a duplicate delivery is a complete no-op", async () => {
@@ -196,6 +204,7 @@ describe("recordOrderFromWebhook", () => {
     expect(prismaMock.visit.upsert).not.toHaveBeenCalled();
     expect(prismaMock.contactLocation.upsert).not.toHaveBeenCalled();
     expect(syncFieldsMock).not.toHaveBeenCalled();
+    expect(recomputePreferencesMock).not.toHaveBeenCalled();
   });
 
   it("guards lastOrderAt with a monotonic database update", async () => {
@@ -295,6 +304,53 @@ describe("recordOrderFromWebhook", () => {
     });
     expect(prismaMock.visit.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.contactLocation.upsert).toHaveBeenCalledTimes(1);
+    expect(recomputePreferencesMock).not.toHaveBeenCalled();
+  });
+
+  it("recomputes preferences when backfill adds line items to a legacy order", async () => {
+    prismaMock.processedOrder.create.mockRejectedValue({ code: "P2002" });
+    prismaMock.processedOrder.findUnique.mockResolvedValue({
+      id: "p2",
+      orderName: null,
+      total: null,
+      currencyCode: null,
+      occurredAt: null,
+      sourceName: null,
+      locationId: null,
+      posUserId: null,
+      posDeviceId: null,
+      lineItems: null,
+    });
+    prismaMock.processedOrder.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await recordOrderWithVisit(
+      {
+        shop: "s",
+        orderGid: "gid://shopify/Order/2",
+        contactId: "c1",
+        orderName: "#2",
+        total: "20.00",
+        currencyCode: "USD",
+        occurredAt: new Date("2026-06-02T00:00:00Z"),
+        sourceName: "web",
+        locationId: null,
+        posUserId: null,
+        posDeviceId: null,
+        lineItems: [
+          {
+            title: "Sneaker",
+            quantity: 1,
+            variantTitle: "10 / White",
+            sku: null,
+            productId: null,
+          },
+        ],
+      },
+      { enrichExisting: true },
+    );
+
+    expect(result).toBe("enriched");
+    expect(recomputePreferencesMock).toHaveBeenCalledWith("s", "c1", prismaMock);
   });
 
   it("skips guest checkouts (no customer)", async () => {

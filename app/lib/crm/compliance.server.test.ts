@@ -33,6 +33,7 @@ describe("assembleCustomerData", () => {
     await assembleCustomerData("shop.myshopify.com", "gid://shopify/Customer/1");
 
     const processedOrders = prismaMock.contact.findFirst.mock.calls[0][0].include.processedOrders;
+    expect(prismaMock.contact.findFirst.mock.calls[0][0].include.preferences).toBe(true);
     expect(processedOrders.select).toMatchObject({
       orderGid: true,
       orderName: true,

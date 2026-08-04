@@ -131,6 +131,8 @@ export async function* iterateCustomers(
 export interface LiveLineItem {
   title: string;
   quantity: number;
+  variantTitle: string | null;
+  sku: string | null;
 }
 
 export interface LiveCustomerOrder {
@@ -249,7 +251,7 @@ const CUSTOMER_DETAIL_QUERY = `#graphql
           displayFinancialStatus
           displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
-          lineItems(first: 10) { nodes { title quantity } }
+          lineItems(first: 10) { nodes { title quantity variantTitle sku } }
         }
       }
     }
@@ -386,7 +388,7 @@ const CUSTOMER_ORDERS_QUERY = `#graphql
           displayFinancialStatus
           displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
-          lineItems(first: 10) { nodes { title quantity } }
+          lineItems(first: 10) { nodes { title quantity variantTitle sku } }
         }
       }
     }

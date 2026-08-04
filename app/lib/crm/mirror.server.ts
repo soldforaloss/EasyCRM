@@ -14,6 +14,7 @@ import {
   type AdminGraphqlClient,
 } from "../shopify/customers.server";
 import { iterateRecentOrders } from "../shopify/orders.server";
+import { recomputeDerivedPreferences } from "./preferences.server";
 
 export interface CustomerWebhookPayload {
   id?: number | string;
@@ -349,6 +350,13 @@ async function enrichExistingOrder(
     });
     if (updated.count !== 1) return "duplicate";
     if (addVisit && visitDate) await recordPosVisit(tx, input, visitDate);
+    if (
+      existing.lineItems === null &&
+      incoming.lineItems !== null &&
+      (input.lineItems?.length ?? 0) > 0
+    ) {
+      await recomputeDerivedPreferences(input.shop, input.contactId, tx);
+    }
     return "enriched";
   });
 }
@@ -367,6 +375,9 @@ export async function recordOrderWithVisit(
       await tx.processedOrder.create({ data: processedOrderData(input) });
       if (visitDate) await recordPosVisit(tx, input, visitDate);
       if (options.applyWebhookEffects) await applyWebhookOrderEffects(tx, input);
+      if ((input.lineItems?.length ?? 0) > 0) {
+        await recomputeDerivedPreferences(input.shop, input.contactId, tx);
+      }
       return "created" as const;
     });
   } catch (error) {

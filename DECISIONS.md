@@ -374,3 +374,18 @@ The Tasks page defaults to **My tasks** when an embedded session token identifie
 member and filters by `Task.assigneeStaffId`; staff can switch to **All tasks** explicitly. When no
 staff identity is available, **All tasks** is the safe, usable default because filtering on a null
 identity would hide work rather than identify its owner.
+
+## 20. Size preferences: constrained derivation with explicit overrides
+
+Size derivation uses only Shopify `variantTitle` option tokens, split on Shopify's ` / ` separator.
+For this streetwear/sneaker merchant, exact `XXS`–`4XL` apparel tokens become `SHIRT_SIZE`; numeric
+shoe tokens from 3.5 through 18 in 0.5 steps become `SHOE_SIZE`, with a trailing women's/men's
+`W`/`M` marker removed. Colors, widths, free text and larger numbers such as 30/32 waist sizes are
+ignored. This deliberately narrow heuristic favors false negatives over showing staff a confidently
+wrong size.
+
+Derived values are weighted by purchased quantity across accumulated local order line items. Ties
+prefer the later observation because orders are processed oldest-first, making recent purchasing
+behavior the useful tiebreaker. A `MANUAL` row always outranks `DERIVED` for display without deleting
+the evidence-backed value; clearing the override immediately reveals the current derivation again.
+Manual values remain app-owned and require no Shopify customer-write scope.
