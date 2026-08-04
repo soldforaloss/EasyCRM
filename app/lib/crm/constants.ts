@@ -71,6 +71,19 @@ export function lifecycleStageLabel(v: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* Location / visit foundation                                         */
+/* ------------------------------------------------------------------ */
+
+export const VISIT_SOURCES = ["POS_ORDER"] as const;
+export type VisitSource = (typeof VISIT_SOURCES)[number];
+
+export const CONTACT_PREFERENCE_KEYS = ["SHIRT_SIZE", "SHOE_SIZE"] as const;
+export type ContactPreferenceKey = (typeof CONTACT_PREFERENCE_KEYS)[number];
+
+export const CONTACT_PREFERENCE_SOURCES = ["DERIVED", "MANUAL"] as const;
+export type ContactPreferenceSource = (typeof CONTACT_PREFERENCE_SOURCES)[number];
+
+/* ------------------------------------------------------------------ */
 /* Activity (timeline) type                                            */
 /* ------------------------------------------------------------------ */
 

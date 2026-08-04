@@ -14,12 +14,20 @@
  */
 
 import { randomUUID } from "crypto";
+import type { Job } from "@prisma/client";
 import { logger, reportError } from "../logger.server";
 import { runJob } from "./handlers.server";
-import { claimJobs, completeJob, failJob, reclaimStaleJobs } from "./queue.server";
+import {
+  claimJobs,
+  completeJob,
+  failJob,
+  reclaimStaleJobs,
+  renewJobLock,
+} from "./queue.server";
 
 const DEFAULT_INTERVAL_MS = 2_000;
 const DEFAULT_BATCH = 5;
+const LEASE_RENEW_INTERVAL_MS = 60_000;
 
 function intFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -35,6 +43,62 @@ export interface WorkerHandle {
 
 let running: WorkerHandle | null = null;
 
+async function runClaimedJob(job: Job, workerId: string): Promise<void> {
+  const startedAt = Date.now();
+  let leaseFailure: Error | null = null;
+  let renewalInFlight: Promise<void> | null = null;
+
+  const renewLease = () => {
+    if (renewalInFlight) return;
+    renewalInFlight = renewJobLock(job.id, workerId)
+      .then((renewed) => {
+        if (!renewed) leaseFailure = new Error(`Lost lease for job ${job.id}`);
+      })
+      .catch((error: unknown) => {
+        leaseFailure = error instanceof Error ? error : new Error(String(error));
+      })
+      .finally(() => {
+        renewalInFlight = null;
+      });
+  };
+
+  const leaseTimer = setInterval(renewLease, LEASE_RENEW_INTERVAL_MS);
+  leaseTimer.unref?.();
+
+  try {
+    await runJob(job);
+    const pendingRenewal = renewalInFlight;
+    if (pendingRenewal) await pendingRenewal;
+    if (leaseFailure) throw leaseFailure;
+
+    const completed = await completeJob(job.id, workerId);
+    if (!completed) throw new Error(`Lost lease before completing job ${job.id}`);
+    logger.info("job.done", {
+      jobId: job.id,
+      type: job.type,
+      shop: job.shop,
+      attempts: job.attempts,
+      ms: Date.now() - startedAt,
+    });
+  } catch (error) {
+    try {
+      const { willRetry, updated } = await failJob(job, error, workerId);
+      await reportError("job.failed", error, {
+        jobId: job.id,
+        type: job.type,
+        shop: job.shop,
+        attempts: job.attempts,
+        willRetry,
+        updated,
+      });
+    } catch (bookkeepingError) {
+      await reportError("job.fail_bookkeeping_error", bookkeepingError, { jobId: job.id });
+    }
+  } finally {
+    clearInterval(leaseTimer);
+  }
+}
+
 /**
  * Process one batch of jobs. Returns how many were handled.
  *
@@ -43,37 +107,16 @@ let running: WorkerHandle | null = null;
  */
 async function tickOnce(workerId: string, batchSize: number): Promise<number> {
   await reclaimStaleJobs();
-  const jobs = await claimJobs(batchSize, workerId);
-  if (jobs.length === 0) return 0;
-
-  for (const job of jobs) {
-    const startedAt = Date.now();
-    try {
-      await runJob(job);
-      await completeJob(job.id);
-      logger.info("job.done", {
-        jobId: job.id,
-        type: job.type,
-        shop: job.shop,
-        attempts: job.attempts,
-        ms: Date.now() - startedAt,
-      });
-    } catch (error) {
-      try {
-        const { willRetry } = await failJob(job, error);
-        await reportError("job.failed", error, {
-          jobId: job.id,
-          type: job.type,
-          shop: job.shop,
-          attempts: job.attempts,
-          willRetry,
-        });
-      } catch (bookkeepingError) {
-        await reportError("job.fail_bookkeeping_error", bookkeepingError, { jobId: job.id });
-      }
-    }
+  let handled = 0;
+  while (handled < batchSize) {
+    // Claim only the next job so later jobs do not age toward the stale threshold while waiting
+    // behind a long-running handler in this sequential worker.
+    const [job] = await claimJobs(1, workerId);
+    if (!job) break;
+    handled += 1;
+    await runClaimedJob(job, workerId);
   }
-  return jobs.length;
+  return handled;
 }
 
 /**

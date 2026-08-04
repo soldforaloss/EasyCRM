@@ -13,9 +13,10 @@ import { unauthenticated } from "../../shopify.server";
 import { refreshBatchProgress } from "../crm/bulk.server";
 import { prepareSend, sendOneToContact, type SenderPrep } from "../crm/messaging.server";
 import { getCachedPrep, setCachedPrep } from "../crm/sender-cache.server";
-import { backfillContacts } from "../crm/mirror.server";
+import { backfillContacts, backfillOrders } from "../crm/mirror.server";
 import { isChannel, type Channel } from "../crm/constants";
 import { logger } from "../logger.server";
+import { syncLocations, syncShopTimezone } from "../shopify/locations.server";
 import { jobPayload, type JobType } from "./queue.server";
 
 export interface SendOnePayload {
@@ -78,17 +79,28 @@ async function handleSendOne(job: Job): Promise<void> {
 /** One-time mirror of a shop's existing customers, moved off the OAuth callback. */
 async function handleBackfill(job: Job): Promise<void> {
   const { admin } = await unauthenticated.admin(job.shop);
+  const locations = await syncLocations(admin, job.shop);
   const result = await backfillContacts(admin, job.shop);
   logger.info("job.backfill.done", {
     shop: job.shop,
     processed: result.processed,
     pages: result.pages,
+    locations: locations.processed,
   });
+}
+
+/** Mirror the standard trailing 60-day Shopify order window into local orders and visits. */
+async function handleOrderBackfill(job: Job): Promise<void> {
+  const { admin } = await unauthenticated.admin(job.shop);
+  await syncShopTimezone(admin, job.shop);
+  const result = await backfillOrders(admin, job.shop);
+  logger.info("job.backfill_orders.done", { shop: job.shop, ...result });
 }
 
 const HANDLERS: Record<JobType, (job: Job) => Promise<void>> = {
   SEND_ONE: handleSendOne,
   BACKFILL_CUSTOMERS: handleBackfill,
+  BACKFILL_ORDERS: handleOrderBackfill,
 };
 
 /** Dispatch a claimed job to its handler. Throws for the worker to retry. */

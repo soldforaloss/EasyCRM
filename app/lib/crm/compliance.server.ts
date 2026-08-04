@@ -32,6 +32,22 @@ export async function assembleCustomerData(shop: string, customerGid: string) {
       activities: true,
       messageLogs: true,
       tasks: true,
+      processedOrders: {
+        select: {
+          orderGid: true,
+          orderName: true,
+          total: true,
+          currencyCode: true,
+          occurredAt: true,
+          sourceName: true,
+          locationId: true,
+          lineItems: true,
+          createdAt: true,
+        },
+      },
+      visits: true,
+      contactLocations: true,
+      preferences: true,
     },
   });
   return {
@@ -115,11 +131,19 @@ export async function redactCustomer(shop: string, customerGid: string): Promise
     where: { shop, shopifyCustomerId: customerGid },
     select: { id: true },
   });
-  if (!contact) return;
+  if (!contact) {
+    await prisma.dataRequest.deleteMany({ where: { shop, shopifyCustomerId: customerGid } });
+    return;
+  }
   // Remove tasks tied to this contact explicitly (the relation only nulls them on delete).
-  await prisma.task.deleteMany({ where: { shop, contactId: contact.id } });
-  // Deleting the contact cascades notes, activities, message logs and contact-tag links.
-  await prisma.contact.deleteMany({ where: { shop, id: contact.id } });
+  // DataRequest is a denormalized export with no Contact FK, so it must be erased explicitly.
+  await prisma.$transaction([
+    prisma.task.deleteMany({ where: { shop, contactId: contact.id } }),
+    // Deleting the contact cascades notes, activities, message logs, tags, local orders, visits,
+    // location rollups and preferences. Tasks are SetNull, so they are removed explicitly above.
+    prisma.contact.deleteMany({ where: { shop, id: contact.id } }),
+    prisma.dataRequest.deleteMany({ where: { shop, shopifyCustomerId: customerGid } }),
+  ]);
 }
 
 /** Delete ALL data for a shop (shop/redact, ~48h after uninstall). */
@@ -130,12 +154,17 @@ export async function redactShop(shop: string): Promise<void> {
     prisma.note.deleteMany({ where: { shop } }),
     prisma.contactTag.deleteMany({ where: { shop } }),
     prisma.task.deleteMany({ where: { shop } }),
+    prisma.processedOrder.deleteMany({ where: { shop } }),
+    prisma.visit.deleteMany({ where: { shop } }),
+    prisma.contactLocation.deleteMany({ where: { shop } }),
+    prisma.contactPreference.deleteMany({ where: { shop } }),
     prisma.tag.deleteMany({ where: { shop } }),
     prisma.contact.deleteMany({ where: { shop } }),
+    prisma.location.deleteMany({ where: { shop } }),
+    prisma.staffProfile.deleteMany({ where: { shop } }),
     prisma.segment.deleteMany({ where: { shop } }),
     prisma.messageTemplate.deleteMany({ where: { shop } }),
     prisma.messageBatch.deleteMany({ where: { shop } }),
-    prisma.processedOrder.deleteMany({ where: { shop } }),
     prisma.dataRequest.deleteMany({ where: { shop } }),
     prisma.job.deleteMany({ where: { shop } }),
     prisma.shopSettings.deleteMany({ where: { shop } }),

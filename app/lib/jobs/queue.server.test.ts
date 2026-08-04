@@ -21,6 +21,7 @@ import {
   failJob,
   jobPayload,
   reclaimStaleJobs,
+  renewJobLock,
 } from "./queue.server";
 
 function job(overrides: Record<string, unknown> = {}) {
@@ -124,28 +125,45 @@ describe("claimJobs", () => {
 
 describe("failJob", () => {
   it("requeues with backoff while attempts remain", async () => {
-    prismaMock.job.update.mockResolvedValue(job() as never);
-    const { willRetry } = await failJob(job({ attempts: 1, maxAttempts: 3 }), new Error("boom"));
+    prismaMock.job.updateMany.mockResolvedValue({ count: 1 } as never);
+    const { willRetry, updated } = await failJob(
+      job({ attempts: 1, maxAttempts: 3 }),
+      new Error("boom"),
+      "w1",
+    );
 
     expect(willRetry).toBe(true);
-    const data = prismaMock.job.update.mock.calls[0][0].data;
+    expect(updated).toBe(true);
+    const call = prismaMock.job.updateMany.mock.calls[0][0];
+    expect(call.where).toEqual({ id: "j1", status: "RUNNING", lockedBy: "w1" });
+    const data = call.data;
     expect(data.status).toBe("PENDING");
     expect(data.runAt.getTime()).toBeGreaterThan(Date.now());
     expect(data.lastError).toBe("boom");
   });
 
   it("parks the job as FAILED once attempts are exhausted", async () => {
-    prismaMock.job.update.mockResolvedValue(job() as never);
-    const { willRetry } = await failJob(job({ attempts: 3, maxAttempts: 3 }), new Error("boom"));
+    prismaMock.job.updateMany.mockResolvedValue({ count: 1 } as never);
+    const { willRetry } = await failJob(
+      job({ attempts: 3, maxAttempts: 3 }),
+      new Error("boom"),
+      "w1",
+    );
 
     expect(willRetry).toBe(false);
-    expect(prismaMock.job.update.mock.calls[0][0].data.status).toBe("FAILED");
+    expect(prismaMock.job.updateMany.mock.calls[0][0].data.status).toBe("FAILED");
   });
 
   it("truncates very long error messages", async () => {
-    prismaMock.job.update.mockResolvedValue(job() as never);
-    await failJob(job(), new Error("x".repeat(5000)));
-    expect(prismaMock.job.update.mock.calls[0][0].data.lastError.length).toBe(2000);
+    prismaMock.job.updateMany.mockResolvedValue({ count: 1 } as never);
+    await failJob(job(), new Error("x".repeat(5000)), "w1");
+    expect(prismaMock.job.updateMany.mock.calls[0][0].data.lastError.length).toBe(2000);
+  });
+
+  it("does not overwrite a job after this worker loses the lease", async () => {
+    prismaMock.job.updateMany.mockResolvedValue({ count: 0 } as never);
+    const result = await failJob(job(), new Error("boom"), "old-worker");
+    expect(result.updated).toBe(false);
   });
 });
 
@@ -162,11 +180,28 @@ describe("reclaimStaleJobs", () => {
 });
 
 describe("completeJob", () => {
-  it("clears the lock and the last error", async () => {
-    prismaMock.job.update.mockResolvedValue(job() as never);
-    await completeJob("j1");
-    const data = prismaMock.job.update.mock.calls[0][0].data;
+  it("clears the lock and the last error only for the owning worker", async () => {
+    prismaMock.job.updateMany.mockResolvedValue({ count: 1 } as never);
+    expect(await completeJob("j1", "w1")).toBe(true);
+    const call = prismaMock.job.updateMany.mock.calls[0][0];
+    expect(call.where).toEqual({ id: "j1", status: "RUNNING", lockedBy: "w1" });
+    const data = call.data;
     expect(data).toMatchObject({ status: "DONE", lockedAt: null, lockedBy: null, lastError: null });
+  });
+
+  it("returns false after ownership changes", async () => {
+    prismaMock.job.updateMany.mockResolvedValue({ count: 0 } as never);
+    expect(await completeJob("j1", "old-worker")).toBe(false);
+  });
+});
+
+describe("renewJobLock", () => {
+  it("refreshes only the owning worker's running job", async () => {
+    prismaMock.job.updateMany.mockResolvedValue({ count: 1 } as never);
+    expect(await renewJobLock("j1", "w1")).toBe(true);
+    const call = prismaMock.job.updateMany.mock.calls[0][0];
+    expect(call.where).toEqual({ id: "j1", status: "RUNNING", lockedBy: "w1" });
+    expect(call.data.lockedAt).toBeInstanceOf(Date);
   });
 });
 

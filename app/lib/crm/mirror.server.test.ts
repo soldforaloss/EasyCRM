@@ -14,7 +14,20 @@ const { prismaMock } = vi.hoisted(() => ({
     },
     processedOrder: {
       create: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn(),
     },
+    visit: {
+      upsert: vi.fn(),
+    },
+    contactLocation: {
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    shopSettings: {
+      findUnique: vi.fn(),
+    },
+    $transaction: vi.fn(),
   },
 }));
 vi.mock("../../db.server", () => ({ default: prismaMock }));
@@ -28,13 +41,16 @@ vi.mock("../shopify/customers.server", () => ({
 
 import {
   deleteContactFromWebhook,
+  recordOrderAndRefresh,
   recordOrderFromWebhook,
+  recordOrderWithVisit,
   refreshContactFromShopify,
   upsertContactFromWebhook,
 } from "./mirror.server";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
 });
 
 describe("upsertContactFromWebhook", () => {
@@ -93,9 +109,10 @@ describe("deleteContactFromWebhook", () => {
 });
 
 describe("recordOrderFromWebhook", () => {
-  it("records a new order: takes the dedup lock, increments spend, logs ORDER_PLACED", async () => {
-    prismaMock.contact.upsert.mockResolvedValue({ id: "c1", lastOrderAt: null });
+  it("records one POS visit and location rollup with the enriched local order", async () => {
+    prismaMock.contact.upsert.mockResolvedValue({ id: "c1" });
     prismaMock.processedOrder.create.mockResolvedValue({ id: "p1" }); // lock acquired
+    prismaMock.shopSettings.findUnique.mockResolvedValue({ ianaTimezone: "America/Phoenix" });
 
     await recordOrderFromWebhook("s", {
       id: 1001,
@@ -103,41 +120,86 @@ describe("recordOrderFromWebhook", () => {
       total_price: "50.00",
       currency: "USD",
       created_at: "2026-06-01T00:00:00Z",
+      source_name: "pos",
+      location_id: 55,
+      user_id: 77,
+      device_id: 88,
+      line_items: [
+        {
+          title: "Oxford Shirt",
+          quantity: 2,
+          variant_title: "Large",
+          sku: "OX-L",
+          product_id: 999,
+          price: "25.00",
+        },
+      ],
       customer: { id: 123, email: "a@b.com" },
     });
 
     expect(prismaMock.processedOrder.create).toHaveBeenCalledTimes(1);
-    expect(prismaMock.processedOrder.create.mock.calls[0][0].data.orderGid).toBe(
-      "gid://shopify/Order/1001",
-    );
+    const order = prismaMock.processedOrder.create.mock.calls[0][0].data;
+    expect(order).toMatchObject({
+      orderGid: "gid://shopify/Order/1001",
+      orderName: "#1001",
+      total: "50.00",
+      currencyCode: "USD",
+      sourceName: "pos",
+      locationId: "55",
+      posUserId: "77",
+      posDeviceId: "88",
+    });
+    expect(JSON.parse(order.lineItems)).toEqual([
+      {
+        title: "Oxford Shirt",
+        quantity: 2,
+        variantTitle: "Large",
+        sku: "OX-L",
+        productId: "999",
+      },
+    ]);
+    expect(prismaMock.visit.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.visit.upsert.mock.calls[0][0].create).toMatchObject({
+      locationId: "55",
+      visitDate: "2026-05-31",
+      source: "POS_ORDER",
+    });
+    expect(prismaMock.contactLocation.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.contactLocation.upsert.mock.calls[0][0].update.ordersCount).toEqual({
+      increment: 1,
+    });
     expect(prismaMock.contact.update).toHaveBeenCalledTimes(1);
     const upd = prismaMock.contact.update.mock.calls[0][0];
     expect(upd.data.ordersCount).toEqual({ increment: 1 });
     expect(upd.data.amountSpent).toEqual({ increment: 50 });
-    expect(upd.data.lastOrderAt).toBeInstanceOf(Date); // advanced from null
     expect(prismaMock.activity.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.activity.create.mock.calls[0][0].data.type).toBe("ORDER_PLACED");
   });
 
-  it("is idempotent: a duplicate delivery (P2002 on the lock) is ignored", async () => {
-    prismaMock.contact.upsert.mockResolvedValue({ id: "c1", lastOrderAt: null });
+  it("is idempotent: a duplicate delivery is a complete no-op", async () => {
+    prismaMock.contact.upsert.mockResolvedValue({ id: "c1" });
     prismaMock.processedOrder.create.mockRejectedValue({ code: "P2002" });
 
-    await recordOrderFromWebhook("s", {
+    const admin = { graphql: vi.fn() };
+    await recordOrderAndRefresh(admin, "s", {
       id: 1001,
       total_price: "50.00",
+      created_at: "2026-06-01T00:00:00Z",
+      source_name: "pos",
+      location_id: 55,
       customer: { id: 123 },
     });
 
     expect(prismaMock.contact.update).not.toHaveBeenCalled();
+    expect(prismaMock.contact.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.activity.create).not.toHaveBeenCalled();
+    expect(prismaMock.visit.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.contactLocation.upsert).not.toHaveBeenCalled();
+    expect(syncFieldsMock).not.toHaveBeenCalled();
   });
 
-  it("does not regress lastOrderAt for an older out-of-order delivery", async () => {
-    prismaMock.contact.upsert.mockResolvedValue({
-      id: "c1",
-      lastOrderAt: new Date("2026-06-10T00:00:00Z"),
-    });
+  it("guards lastOrderAt with a monotonic database update", async () => {
+    prismaMock.contact.upsert.mockResolvedValue({ id: "c1" });
     prismaMock.processedOrder.create.mockResolvedValue({ id: "p2" });
 
     await recordOrderFromWebhook("s", {
@@ -147,14 +209,98 @@ describe("recordOrderFromWebhook", () => {
       customer: { id: 123 },
     });
 
-    const upd = prismaMock.contact.update.mock.calls[0][0];
-    expect("lastOrderAt" in upd.data).toBe(false); // not advanced backwards
-    expect(upd.data.ordersCount).toEqual({ increment: 1 }); // still counted
+    expect(prismaMock.contact.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "c1",
+        OR: [
+          { lastOrderAt: null },
+          { lastOrderAt: { lt: new Date("2026-06-01T00:00:00Z") } },
+        ],
+      },
+      data: { lastOrderAt: new Date("2026-06-01T00:00:00Z") },
+    });
+    expect(prismaMock.contact.update.mock.calls[0][0].data.ordersCount).toEqual({ increment: 1 });
+  });
+
+  it("records online order enrichment without creating a visit", async () => {
+    prismaMock.contact.upsert.mockResolvedValue({ id: "c1" });
+    prismaMock.processedOrder.create.mockResolvedValue({ id: "p3" });
+
+    await recordOrderFromWebhook("s", {
+      id: 1002,
+      name: "#1002",
+      total_price: "35.00",
+      currency: "USD",
+      created_at: "2026-06-02T00:00:00Z",
+      source_name: "web",
+      location_id: null,
+      line_items: [{ title: "Hat", quantity: 1, sku: "HAT" }],
+      customer: { id: 123 },
+    });
+
+    expect(prismaMock.processedOrder.create.mock.calls[0][0].data).toMatchObject({
+      sourceName: "web",
+      locationId: null,
+      total: "35.00",
+    });
+    expect(prismaMock.visit.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.contactLocation.upsert).not.toHaveBeenCalled();
+  });
+
+  it("backfill enriches only null legacy fields and repairs the missing POS rollup", async () => {
+    prismaMock.processedOrder.create.mockRejectedValue({ code: "P2002" });
+    prismaMock.processedOrder.findUnique.mockResolvedValue({
+      id: "p1",
+      orderName: "#keep",
+      total: null,
+      currencyCode: null,
+      occurredAt: null,
+      sourceName: null,
+      locationId: null,
+      posUserId: null,
+      posDeviceId: null,
+      lineItems: null,
+    });
+    prismaMock.processedOrder.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.shopSettings.findUnique.mockResolvedValue({ ianaTimezone: "America/Phoenix" });
+
+    const result = await recordOrderWithVisit(
+      {
+        shop: "s",
+        orderGid: "gid://shopify/Order/1",
+        contactId: "c1",
+        orderName: "#new",
+        total: "40.00",
+        currencyCode: "USD",
+        occurredAt: new Date("2026-06-01T00:00:00Z"),
+        sourceName: "pos",
+        locationId: "55",
+        posUserId: null,
+        posDeviceId: null,
+        lineItems: [],
+      },
+      { enrichExisting: true },
+    );
+
+    expect(result).toBe("enriched");
+    const update = prismaMock.processedOrder.updateMany.mock.calls[0][0];
+    expect(update.where).toEqual({ id: "p1", locationId: null });
+    expect(update.data.orderName).toBeUndefined();
+    expect(update.data).toMatchObject({
+      total: "40.00",
+      currencyCode: "USD",
+      sourceName: "pos",
+      locationId: "55",
+      lineItems: "[]",
+    });
+    expect(prismaMock.visit.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.contactLocation.upsert).toHaveBeenCalledTimes(1);
   });
 
   it("skips guest checkouts (no customer)", async () => {
     await recordOrderFromWebhook("s", { id: 7, total_price: "10.00", customer: null });
     expect(prismaMock.contact.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.processedOrder.create).not.toHaveBeenCalled();
   });
 });
 

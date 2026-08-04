@@ -15,7 +15,7 @@ import { randomUUID } from "crypto";
 import type { Job } from "@prisma/client";
 import prisma from "../../db.server";
 
-export const JOB_TYPES = ["SEND_ONE", "BACKFILL_CUSTOMERS"] as const;
+export const JOB_TYPES = ["SEND_ONE", "BACKFILL_CUSTOMERS", "BACKFILL_ORDERS"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ["PENDING", "RUNNING", "DONE", "FAILED"] as const;
@@ -91,6 +91,15 @@ export async function reclaimStaleJobs(): Promise<number> {
   return result.count;
 }
 
+/** Refresh a running job's lease. Returns false when this worker no longer owns the claim. */
+export async function renewJobLock(id: string, workerId: string): Promise<boolean> {
+  const result = await prisma.job.updateMany({
+    where: { id, status: "RUNNING", lockedBy: workerId },
+    data: { lockedAt: new Date() },
+  });
+  return result.count === 1;
+}
+
 /**
  * Atomically claim up to `limit` runnable jobs for this worker.
  *
@@ -124,23 +133,28 @@ export async function claimJobs(limit: number, workerId: string = randomUUID()):
   return prisma.job.findMany({ where: { id: { in: claimed } } });
 }
 
-/** Mark a claimed job finished. */
-export async function completeJob(id: string): Promise<void> {
-  await prisma.job.update({
-    where: { id },
+/** Mark a claimed job finished, but only while this worker still owns the lease. */
+export async function completeJob(id: string, workerId: string): Promise<boolean> {
+  const result = await prisma.job.updateMany({
+    where: { id, status: "RUNNING", lockedBy: workerId },
     data: { status: "DONE", lockedAt: null, lockedBy: null, lastError: null },
   });
+  return result.count === 1;
 }
 
 /**
  * Mark a claimed job failed. Retries with exponential backoff while attempts remain, otherwise
  * parks the job in FAILED for inspection (jobs are never silently dropped).
  */
-export async function failJob(job: Job, error: unknown): Promise<{ willRetry: boolean }> {
+export async function failJob(
+  job: Job,
+  error: unknown,
+  workerId: string,
+): Promise<{ willRetry: boolean; updated: boolean }> {
   const message = error instanceof Error ? error.message : String(error);
   const willRetry = job.attempts < job.maxAttempts;
-  await prisma.job.update({
-    where: { id: job.id },
+  const result = await prisma.job.updateMany({
+    where: { id: job.id, status: "RUNNING", lockedBy: workerId },
     data: {
       status: willRetry ? "PENDING" : "FAILED",
       runAt: willRetry ? new Date(Date.now() + backoffMs(job.attempts)) : job.runAt,
@@ -149,7 +163,7 @@ export async function failJob(job: Job, error: unknown): Promise<{ willRetry: bo
       lastError: message.slice(0, 2000),
     },
   });
-  return { willRetry };
+  return { willRetry, updated: result.count === 1 };
 }
 
 /** Parse a job's JSON payload into a typed shape. */

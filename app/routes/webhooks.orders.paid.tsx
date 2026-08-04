@@ -6,9 +6,8 @@ import {
   type OrderWebhookPayload,
 } from "../lib/crm/mirror.server";
 
-// orders/paid reuses the same idempotent recorder; if orders/create already logged this order,
-// the (shop, orderGid) dedup lock makes the timeline part a no-op while the refresh keeps the
-// cached spend authoritative.
+// orders/paid reuses the same idempotent recorder. If orders/create already captured the order,
+// the (shop, orderGid) dedup lock makes the entire duplicate delivery a no-op.
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { shop, topic, payload, admin } = await authenticate.webhook(request);
   console.log(`Received ${topic} webhook for ${shop}`);

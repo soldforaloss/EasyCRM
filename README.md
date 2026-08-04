@@ -18,7 +18,7 @@ shows live order history, and sends BYOK email + SMS via **Brevo**. See
 | --- | --- | --- |
 | `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` | yes | Provided by the Shopify CLI (`shopify app dev`) / your host. |
 | `SHOPIFY_APP_URL` | yes | App URL / tunnel URL (set by the CLI in dev). |
-| `SCOPES` | optional | Falls back to `shopify.app.toml` (`read_customers,read_orders`). |
+| `SCOPES` | optional | Falls back to `shopify.app.toml` (`read_customers,read_orders,read_locations`). |
 | `DATABASE_URL` | yes | **PostgreSQL** connection string. No default — the app throws at boot without it. |
 | `ENCRYPTION_KEY` | yes | 32-byte secret (64 hex chars or 32-byte base64) used to AES-256-GCM encrypt the Brevo API key at rest. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
 | `SENTRY_DSN` | optional | Enables error reporting. Requires `npm i @sentry/node`; without it the app logs and continues. |

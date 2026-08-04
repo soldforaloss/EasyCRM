@@ -94,7 +94,9 @@ at 2026-04).
 
 ## 4. Scopes (minimal)
 
-`shopify.app.toml` `scopes = "read_customers,read_orders"`.
+`shopify.app.toml` `scopes = "read_customers,read_orders,read_locations"`.
+- `read_locations` mirrors store names and joins POS order attribution through
+  `Location.legacyResourceId`; it is the only scope added for the clienteling pivot.
 - `write_customers` is **intentionally omitted** (writing CRM tags/metafields back to the
   Shopify customer is the optional stretch in the brief). Add it only when that feature lands.
 - `read_all_orders` is **deliberately NOT requested** — it requires Shopify approval. The app
@@ -319,3 +321,33 @@ plus production dependencies in the runtime stage, running as the non-root `node
   live webhook HMAC delivery and the Brevo round trip have never run against a real store. Every
   gate passed so far is local. See README "Pre-launch checklist".
 - `shopify.app.toml` still carries the placeholder `application_url = "https://example.com"`.
+
+## 18. In-store clienteling pivot: locations, local orders and inferred visits
+
+The pivot adds a tenant-scoped location and visit layer without replacing Shopify as the source of
+truth. `Location.legacyId` joins the GraphQL location mirror to order-webhook `location_id` values;
+`ProcessedOrder` remains the atomic `(shop, orderGid)` lock and is widened into the local order record
+with POS attribution and JSON-as-String line items. `Visit` stores at most one row per customer,
+location and shop-local calendar date, while `ContactLocation` counts each deduplicated POS order at
+that location. `ContactPreference` and `StaffProfile` are schema foundations for later phases.
+
+A visit means a Shopify order with `source_name = "pos"`, a location, a valid Shopify order timestamp
+and an attached customer. Guest orders and non-purchase walk-ins are invisible by design. Multiple POS
+orders in one store on one day coalesce to one Visit but still advance the per-location order rollup.
+The order's `created_at` / GraphQL `createdAt` is authoritative because POS offline mode can deliver a
+webhook late; receipt time is never substituted.
+
+`ShopSettings.ianaTimezone` is self-healed from `shop { ianaTimezone }` during location sync and order
+backfill. Visit dates are `YYYY-MM-DD` strings formatted in that timezone, avoiding UTC-boundary and
+database-timezone ambiguity.
+
+History uses accumulate-forward webhooks plus a trailing 60-day GraphQL backfill under `read_orders`.
+Webhook delivery is strict first-insert-wins: `orders/create` and `orders/paid` duplicates are complete
+no-ops. Backfill reuses the same order/visit choke point and may fill only still-null enrichment on a
+legacy row, so it can repair pre-pivot orders without overwriting webhook data. Webhooks retain product
+IDs from `line_items[].product_id`; GraphQL backfill leaves product IDs null rather than adding the
+broader `read_products` scope. `read_all_orders` remains intentionally omitted.
+
+Manual order resync is bounded to one queued backfill per shop per UTC hour. Running jobs renew a
+worker-owned lease, and completion/failure updates require that same owner; the sequential worker
+claims one job at a time so unstarted work cannot age into the stale-job recovery window.

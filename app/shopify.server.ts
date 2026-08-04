@@ -45,6 +45,17 @@ const shopify = shopifyApp({
             enqueued: Boolean(job),
           });
         }
+        const orderJob = await enqueueJob({
+          shop: session.shop,
+          type: "BACKFILL_ORDERS",
+          payload: {},
+          dedupeKey: "backfill:orders:initial",
+          maxAttempts: 5,
+        });
+        logger.info("install.order_backfill_enqueued", {
+          shop: session.shop,
+          enqueued: Boolean(orderJob),
+        });
       } catch (error) {
         // Never block install on this — the manual "Sync from Shopify" action and the ongoing
         // customer webhooks will reconcile the mirror either way.

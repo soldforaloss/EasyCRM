@@ -4,14 +4,16 @@
  * (see DECISIONS.md / brief §3).
  */
 
+import type { Prisma } from "@prisma/client";
 import prisma from "../../db.server";
 import { parseMoney } from "../format";
-import { logActivity } from "./activity.server";
+import { dateStringInTz } from "../timezone";
 import {
   fetchCustomerSyncFields,
   iterateCustomers,
   type AdminGraphqlClient,
 } from "../shopify/customers.server";
+import { iterateRecentOrders } from "../shopify/orders.server";
 
 export interface CustomerWebhookPayload {
   id?: number | string;
@@ -32,8 +34,47 @@ export interface OrderWebhookPayload {
   created_at?: string | null;
   total_price?: string | null;
   currency?: string | null;
+  location_id?: number | string | null;
+  source_name?: string | null;
+  user_id?: number | string | null;
+  device_id?: number | string | null;
+  line_items?: OrderWebhookLineItem[] | null;
   customer?: CustomerWebhookPayload | null;
 }
+
+export interface OrderWebhookLineItem {
+  title?: string | null;
+  quantity?: number | string | null;
+  variant_title?: string | null;
+  sku?: string | null;
+  product_id?: number | string | null;
+  price?: string | null;
+}
+
+export interface StoredOrderLineItem {
+  title: string;
+  quantity: number;
+  variantTitle: string | null;
+  sku: string | null;
+  productId: string | null;
+}
+
+export interface LocalOrderInput {
+  shop: string;
+  orderGid: string;
+  contactId: string;
+  orderName: string | null;
+  total: string | null;
+  currencyCode: string | null;
+  occurredAt: Date | null;
+  sourceName: string | null;
+  locationId: string | null;
+  posUserId: string | null;
+  posDeviceId: string | null;
+  lineItems: StoredOrderLineItem[] | null;
+}
+
+export type OrderRecordResult = "created" | "enriched" | "duplicate" | "skipped";
 
 function customerGid(p: CustomerWebhookPayload): string | null {
   if (p.admin_graphql_api_id) return p.admin_graphql_api_id;
@@ -41,15 +82,45 @@ function customerGid(p: CustomerWebhookPayload): string | null {
   return null;
 }
 
-function orderGid(p: OrderWebhookPayload): string {
+function orderGid(p: OrderWebhookPayload): string | null {
   if (p.admin_graphql_api_id) return p.admin_graphql_api_id;
-  return `gid://shopify/Order/${p.id}`;
+  if (p.id != null) return `gid://shopify/Order/${p.id}`;
+  return null;
 }
 
 function toInt(v: number | string | null | undefined): number | undefined {
   if (v == null) return undefined;
   const n = typeof v === "number" ? v : Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : undefined;
+}
+
+function toOptionalString(value: number | string | null | undefined): string | null {
+  return value == null ? null : String(value);
+}
+
+function toOptionalDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeWebhookLineItems(
+  items: OrderWebhookLineItem[] | null | undefined,
+): StoredOrderLineItem[] | null {
+  if (!Array.isArray(items)) return null;
+  return items.flatMap((item) => {
+    const quantity = toInt(item.quantity);
+    if (typeof item.title !== "string" || quantity === undefined) return [];
+    return [
+      {
+        title: item.title,
+        quantity,
+        variantTitle: typeof item.variant_title === "string" ? item.variant_title : null,
+        sku: typeof item.sku === "string" ? item.sku : null,
+        productId: toOptionalString(item.product_id),
+      },
+    ];
+  });
 }
 
 /** Upsert the mirror from a customers/create|update webhook. Preserves CRM-owned fields. */
@@ -94,23 +165,229 @@ export async function deleteContactFromWebhook(
   });
 }
 
+interface RecordLocalOrderOptions {
+  /** Backfill may fill columns that were null on a pre-Phase-2 webhook row. */
+  enrichExisting?: boolean;
+  /** Webhooks also maintain the optimistic contact cache and append one timeline activity. */
+  applyWebhookEffects?: boolean;
+}
+
+function processedOrderData(input: LocalOrderInput) {
+  return {
+    shop: input.shop,
+    orderGid: input.orderGid,
+    contactId: input.contactId,
+    orderName: input.orderName,
+    total: input.total,
+    currencyCode: input.currencyCode,
+    occurredAt: input.occurredAt,
+    sourceName: input.sourceName,
+    locationId: input.locationId,
+    posUserId: input.posUserId,
+    posDeviceId: input.posDeviceId,
+    lineItems: input.lineItems === null ? null : JSON.stringify(input.lineItems),
+  };
+}
+
+async function resolveVisitDate(input: LocalOrderInput): Promise<string | null> {
+  if (input.sourceName !== "pos" || !input.locationId || !input.occurredAt) return null;
+  const settings = await prisma.shopSettings.findUnique({
+    where: { shop: input.shop },
+    select: { ianaTimezone: true },
+  });
+  return dateStringInTz(input.occurredAt, settings?.ianaTimezone ?? null);
+}
+
+async function recordPosVisit(
+  tx: Prisma.TransactionClient,
+  input: LocalOrderInput,
+  visitDate: string,
+): Promise<void> {
+  const locationId = input.locationId;
+  const occurredAt = input.occurredAt;
+  if (!locationId || !occurredAt) return;
+
+  await tx.visit.upsert({
+    where: {
+      shop_contactId_locationId_visitDate: {
+        shop: input.shop,
+        contactId: input.contactId,
+        locationId,
+        visitDate,
+      },
+    },
+    update: {},
+    create: {
+      shop: input.shop,
+      contactId: input.contactId,
+      locationId,
+      visitDate,
+      source: "POS_ORDER",
+      orderGid: input.orderGid,
+    },
+  });
+
+  await tx.contactLocation.upsert({
+    where: { contactId_locationId: { contactId: input.contactId, locationId } },
+    update: { ordersCount: { increment: 1 } },
+    create: {
+      shop: input.shop,
+      contactId: input.contactId,
+      locationId,
+      ordersCount: 1,
+      lastOrderAt: occurredAt,
+    },
+  });
+  await tx.contactLocation.updateMany({
+    where: {
+      contactId: input.contactId,
+      locationId,
+      OR: [{ lastOrderAt: null }, { lastOrderAt: { lt: occurredAt } }],
+    },
+    data: { lastOrderAt: occurredAt },
+  });
+
+  await tx.contact.updateMany({
+    where: {
+      id: input.contactId,
+      OR: [{ lastVisitAt: null }, { lastVisitAt: { lt: occurredAt } }],
+    },
+    data: { lastVisitAt: occurredAt, lastVisitLocationId: locationId },
+  });
+}
+
+async function applyWebhookOrderEffects(
+  tx: Prisma.TransactionClient,
+  input: LocalOrderInput,
+): Promise<void> {
+  await tx.contact.update({
+    where: { id: input.contactId },
+    data: {
+      ordersCount: { increment: 1 },
+      amountSpent: { increment: parseMoney(input.total) },
+      ...(input.currencyCode ? { currencyCode: input.currencyCode } : {}),
+    },
+  });
+  if (!input.occurredAt) return;
+
+  await tx.contact.updateMany({
+    where: {
+      id: input.contactId,
+      OR: [{ lastOrderAt: null }, { lastOrderAt: { lt: input.occurredAt } }],
+    },
+    data: { lastOrderAt: input.occurredAt },
+  });
+  await tx.activity.create({
+    data: {
+      shop: input.shop,
+      contactId: input.contactId,
+      type: "ORDER_PLACED",
+      occurredAt: input.occurredAt,
+      payload: JSON.stringify({
+        orderId: input.orderGid,
+        orderName: input.orderName,
+        total: input.total,
+        currency: input.currencyCode,
+      }),
+    },
+  });
+}
+
+async function enrichExistingOrder(
+  input: LocalOrderInput,
+  visitDate: string | null,
+): Promise<OrderRecordResult> {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.processedOrder.findUnique({
+      where: { shop_orderGid: { shop: input.shop, orderGid: input.orderGid } },
+      select: {
+        id: true,
+        orderName: true,
+        total: true,
+        currencyCode: true,
+        occurredAt: true,
+        sourceName: true,
+        locationId: true,
+        posUserId: true,
+        posDeviceId: true,
+        lineItems: true,
+      },
+    });
+    if (!existing) throw new Error(`Processed order disappeared: ${input.orderGid}`);
+
+    const incoming = processedOrderData(input);
+    const update: Prisma.ProcessedOrderUpdateManyMutationInput = {};
+    if (existing.orderName === null && incoming.orderName !== null) update.orderName = incoming.orderName;
+    if (existing.total === null && incoming.total !== null) update.total = incoming.total;
+    if (existing.currencyCode === null && incoming.currencyCode !== null) {
+      update.currencyCode = incoming.currencyCode;
+    }
+    if (existing.occurredAt === null && incoming.occurredAt !== null) {
+      update.occurredAt = incoming.occurredAt;
+    }
+    if (existing.sourceName === null && incoming.sourceName !== null) {
+      update.sourceName = incoming.sourceName;
+    }
+    if (existing.locationId === null && incoming.locationId !== null) {
+      update.locationId = incoming.locationId;
+    }
+    if (existing.posUserId === null && incoming.posUserId !== null) {
+      update.posUserId = incoming.posUserId;
+    }
+    if (existing.posDeviceId === null && incoming.posDeviceId !== null) {
+      update.posDeviceId = incoming.posDeviceId;
+    }
+    if (existing.lineItems === null && incoming.lineItems !== null) {
+      update.lineItems = incoming.lineItems;
+    }
+    if (Object.keys(update).length === 0) return "duplicate";
+
+    const addVisit = Boolean(visitDate && existing.locationId === null && input.locationId);
+    const updated = await tx.processedOrder.updateMany({
+      where: { id: existing.id, ...(addVisit ? { locationId: null } : {}) },
+      data: update,
+    });
+    if (updated.count !== 1) return "duplicate";
+    if (addVisit && visitDate) await recordPosVisit(tx, input, visitDate);
+    return "enriched";
+  });
+}
+
 /**
- * Append an ORDER_PLACED timeline event and bump cached spend signals from an orders/* webhook.
- * Idempotent: a duplicate delivery of the same order is detected and ignored.
+ * The single persistence choke point for a local order record plus optional POS visit/rollup.
+ * Webhook duplicates no-op; backfill may fill only columns that are still null on legacy rows.
  */
+export async function recordOrderWithVisit(
+  input: LocalOrderInput,
+  options: RecordLocalOrderOptions = {},
+): Promise<OrderRecordResult> {
+  const visitDate = await resolveVisitDate(input);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await tx.processedOrder.create({ data: processedOrderData(input) });
+      if (visitDate) await recordPosVisit(tx, input, visitDate);
+      if (options.applyWebhookEffects) await applyWebhookOrderEffects(tx, input);
+      return "created" as const;
+    });
+  } catch (error) {
+    if ((error as { code?: string }).code !== "P2002") throw error;
+    if (!options.enrichExisting) return "duplicate";
+    return enrichExistingOrder(input, visitDate);
+  }
+}
+
+/** Capture one customer-attributed order webhook. Guest orders remain intentionally invisible. */
 export async function recordOrderFromWebhook(
   shop: string,
   payload: OrderWebhookPayload,
-): Promise<void> {
+): Promise<OrderRecordResult> {
   const customer = payload.customer;
-  if (!customer) return; // guest checkout — no contact to attach to
+  if (!customer) return "skipped";
   const gid = customerGid(customer);
-  if (!gid) return;
-
   const oGid = orderGid(payload);
+  if (!gid || !oGid) return "skipped";
 
-  // Ensure the contact exists (the customers/create webhook usually arrives first, but order
-  // events can race or predate the mirror). Create a minimal mirror row if missing.
+  // Customer webhooks can race an order, so establish the minimal contact row before the order FK.
   const contact = await prisma.contact.upsert({
     where: { shop_shopifyCustomerId: { shop, shopifyCustomerId: gid } },
     update: {},
@@ -123,49 +400,26 @@ export async function recordOrderFromWebhook(
       phone: customer.phone ?? null,
       lastSyncedAt: new Date(),
     },
-    select: { id: true, lastOrderAt: true },
+    select: { id: true },
   });
 
-  // Atomic idempotency: the unique (shop, orderGid) constraint means only the FIRST delivery of
-  // this order proceeds. This closes the orders/create + orders/paid race and the prefix-collision
-  // risk of a substring match — duplicate deliveries hit P2002 and no-op (no double-count, no
-  // duplicate timeline event).
-  try {
-    await prisma.processedOrder.create({
-      data: { shop, orderGid: oGid, contactId: contact.id },
-    });
-  } catch (error) {
-    if ((error as { code?: string }).code === "P2002") return; // already processed
-    throw error;
-  }
-
-  const total = parseMoney(payload.total_price);
-  const occurredAt = payload.created_at ? new Date(payload.created_at) : new Date();
-  // Keep lastOrderAt monotonic — out-of-order webhook delivery must not regress it.
-  const advanceLastOrder = !contact.lastOrderAt || occurredAt > contact.lastOrderAt;
-
-  await prisma.contact.update({
-    where: { id: contact.id },
-    data: {
-      ordersCount: { increment: 1 },
-      amountSpent: { increment: total },
-      ...(advanceLastOrder ? { lastOrderAt: occurredAt } : {}),
-      ...(payload.currency ? { currencyCode: payload.currency } : {}),
-    },
-  });
-
-  await logActivity({
-    shop,
-    contactId: contact.id,
-    type: "ORDER_PLACED",
-    occurredAt,
-    payload: {
-      orderId: oGid,
+  return recordOrderWithVisit(
+    {
+      shop,
+      orderGid: oGid,
+      contactId: contact.id,
       orderName: payload.name ?? null,
       total: payload.total_price ?? null,
-      currency: payload.currency ?? null,
+      currencyCode: payload.currency ?? null,
+      occurredAt: toOptionalDate(payload.created_at),
+      sourceName: payload.source_name ?? null,
+      locationId: toOptionalString(payload.location_id),
+      posUserId: toOptionalString(payload.user_id),
+      posDeviceId: toOptionalString(payload.device_id),
+      lineItems: normalizeWebhookLineItems(payload.line_items),
     },
-  });
+    { applyWebhookEffects: true },
+  );
 }
 
 /**
@@ -221,7 +475,8 @@ export async function recordOrderAndRefresh(
   shop: string,
   payload: OrderWebhookPayload,
 ): Promise<void> {
-  await recordOrderFromWebhook(shop, payload);
+  const result = await recordOrderFromWebhook(shop, payload);
+  if (result !== "created") return;
   const gid = payload.customer ? customerGid(payload.customer) : null;
   if (gid) await refreshContactFromShopify(admin, shop, gid);
 }
@@ -229,6 +484,81 @@ export async function recordOrderAndRefresh(
 export interface BackfillResult {
   processed: number;
   pages: number;
+}
+
+export interface OrderBackfillResult extends BackfillResult {
+  created: number;
+  enriched: number;
+  duplicates: number;
+}
+
+/** Backfill the standard Shopify 60-day order window through the shared order/visit choke point. */
+export async function backfillOrders(
+  admin: AdminGraphqlClient,
+  shop: string,
+): Promise<OrderBackfillResult> {
+  let processed = 0;
+  let pages = 0;
+  let created = 0;
+  let enriched = 0;
+  let duplicates = 0;
+
+  for await (const nodes of iterateRecentOrders(admin)) {
+    pages += 1;
+    for (const node of nodes) {
+      if (!node.customer) continue;
+      const occurredAt = new Date(node.createdAt);
+      if (!node.id || Number.isNaN(occurredAt.getTime())) {
+        throw new Error("Shopify returned an invalid order node.");
+      }
+
+      const contact = await prisma.contact.upsert({
+        where: {
+          shop_shopifyCustomerId: { shop, shopifyCustomerId: node.customer.id },
+        },
+        update: {},
+        create: {
+          shop,
+          shopifyCustomerId: node.customer.id,
+          lastSyncedAt: new Date(),
+        },
+        select: { id: true },
+      });
+      const money = node.totalPriceSet?.shopMoney ?? null;
+      const result = await recordOrderWithVisit(
+        {
+          shop,
+          orderGid: node.id,
+          contactId: contact.id,
+          orderName: node.name ?? null,
+          total: money?.amount ?? null,
+          currencyCode: money?.currencyCode ?? null,
+          occurredAt,
+          sourceName: node.sourceName ?? null,
+          locationId:
+            node.retailLocation?.legacyResourceId == null
+              ? null
+              : String(node.retailLocation.legacyResourceId),
+          posUserId: null,
+          posDeviceId: null,
+          lineItems: node.lineItems.nodes.map((item) => ({
+            title: item.title,
+            quantity: item.quantity,
+            variantTitle: item.variantTitle ?? null,
+            sku: item.sku ?? null,
+            // `LineItem.product` would require read_products; webhook product_id remains richer.
+            productId: null,
+          })),
+        },
+        { enrichExisting: true },
+      );
+      processed += 1;
+      if (result === "created") created += 1;
+      else if (result === "enriched") enriched += 1;
+      else duplicates += 1;
+    }
+  }
+  return { processed, pages, created, enriched, duplicates };
 }
 
 /** One-time (idempotent) backfill of existing customers into the mirror on install. */

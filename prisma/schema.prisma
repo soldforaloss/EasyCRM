@@ -26,21 +26,21 @@ datasource db {
 // Shopify session storage (scaffold model — do not remove)
 // ---------------------------------------------------------------------------
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
@@ -51,7 +51,7 @@ model Session {
 
 /// Read-mirror of a Shopify customer plus CRM augmentation.
 model Contact {
-  id                String   @id @default(cuid())
+  id                String @id @default(cuid())
   shop              String
   shopifyCustomerId String // Shopify customer GID, e.g. "gid://shopify/Customer/123"
 
@@ -71,10 +71,12 @@ model Contact {
   // Lightweight cached spend signals (see DECISIONS.md §3) — for list filter/sort only.
   // `amountSpent` is a non-authoritative Float cache key so the list can sort/filter spend
   // numerically; the authoritative money value is fetched live on the detail page.
-  amountSpent  Float    @default(0)
-  currencyCode String?
-  ordersCount  Int      @default(0)
-  lastOrderAt  DateTime?
+  amountSpent         Float     @default(0)
+  currencyCode        String?
+  ordersCount         Int       @default(0)
+  lastOrderAt         DateTime?
+  lastVisitAt         DateTime?
+  lastVisitLocationId String?
 
   // CRM augmentation.
   lifecycleStage String  @default("LEAD") // LEAD | PROSPECT | CUSTOMER | VIP | CHURNED (configurable)
@@ -85,11 +87,15 @@ model Contact {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  tags        ContactTag[]
-  notes       Note[]
-  activities  Activity[]
-  tasks       Task[]
-  messageLogs MessageLog[]
+  tags             ContactTag[]
+  notes            Note[]
+  activities       Activity[]
+  tasks            Task[]
+  messageLogs      MessageLog[]
+  processedOrders  ProcessedOrder[]
+  visits           Visit[]
+  contactLocations ContactLocation[]
+  preferences      ContactPreference[]
 
   @@unique([shop, shopifyCustomerId])
   @@index([shop])
@@ -97,6 +103,7 @@ model Contact {
   @@index([shop, email])
   @@index([shop, phone])
   @@index([shop, amountSpent])
+  @@index([shop, lastVisitAt])
   @@index([shop, updatedAt])
 }
 
@@ -156,16 +163,16 @@ model Activity {
 }
 
 model Task {
-  id             String    @id @default(cuid())
-  shop           String
-  contactId      String? // nullable — standalone tasks allowed
-  title          String
-  notes          String?
-  dueAt          DateTime?
-  status         String    @default("OPEN") // OPEN | DONE
+  id              String    @id @default(cuid())
+  shop            String
+  contactId       String? // nullable — standalone tasks allowed
+  title           String
+  notes           String?
+  dueAt           DateTime?
+  status          String    @default("OPEN") // OPEN | DONE
   assigneeStaffId String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   contact Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
@@ -240,7 +247,7 @@ model MessageLog {
 /// A bulk send. Recipients are fanned out into one Job per contact; this row aggregates progress
 /// so the UI can poll a single record. See DECISIONS.md §11.
 model MessageBatch {
-  id               String   @id @default(cuid())
+  id               String  @id @default(cuid())
   shop             String
   channel          String // EMAIL | SMS
   subject          String?
@@ -270,7 +277,7 @@ model MessageBatch {
 model Job {
   id     String @id @default(cuid())
   shop   String
-  type   String // SEND_ONE | BACKFILL_CUSTOMERS
+  type   String // SEND_ONE | BACKFILL_CUSTOMERS | BACKFILL_ORDERS
   status String @default("PENDING") // PENDING | RUNNING | DONE | FAILED
 
   payload String // JSON.stringify(...) — shape depends on `type`
@@ -279,9 +286,9 @@ model Job {
   /// which is what makes "retry the whole batch" safe.
   dedupeKey String?
 
-  attempts    Int      @default(0)
-  maxAttempts Int      @default(3)
-  runAt       DateTime @default(now())
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  runAt       DateTime  @default(now())
   lockedAt    DateTime?
   lockedBy    String?
   lastError   String?
@@ -299,14 +306,107 @@ model Job {
 /// The unique (shop, orderGid) constraint makes concurrent orders/create + orders/paid deliveries
 /// of the same order safe (only the first insert wins) — see DECISIONS.md §3.
 model ProcessedOrder {
-  id        String   @id @default(cuid())
-  shop      String
-  orderGid  String
-  contactId String
-  createdAt DateTime @default(now())
+  id           String    @id @default(cuid())
+  shop         String
+  orderGid     String
+  contactId    String
+  orderName    String?
+  total        String?
+  currencyCode String?
+  occurredAt   DateTime?
+  sourceName   String?
+  locationId   String?
+  posUserId    String?
+  posDeviceId  String?
+  lineItems    String? // JSON.stringify([{ title, quantity, variantTitle, sku, productId }])
+  createdAt    DateTime  @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   @@unique([shop, orderGid])
   @@index([shop])
+  @@index([shop, contactId])
+  @@index([shop, occurredAt])
+}
+
+/// Read-mirror of a Shopify store location. `legacyId` joins order webhook `location_id` values.
+model Location {
+  id                 String   @id @default(cuid())
+  shop               String
+  shopifyLocationGid String
+  legacyId           String
+  name               String
+  isActive           Boolean  @default(true)
+  city               String?
+  provinceCode       String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([shop, legacyId])
+  @@index([shop])
+}
+
+/// One customer visit per store-local calendar day, inferred from an attributed POS order.
+model Visit {
+  id         String   @id @default(cuid())
+  shop       String
+  contactId  String
+  locationId String
+  visitDate  String // YYYY-MM-DD in the shop's IANA timezone
+  source     String   @default("POS_ORDER") // POS_ORDER
+  orderGid   String?
+  createdAt  DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([shop, contactId, locationId, visitDate])
+  @@index([shop, visitDate])
+  @@index([shop, locationId, visitDate])
+  @@index([shop, contactId])
+}
+
+/// Per-contact order rollup by Shopify location legacy id.
+model ContactLocation {
+  contactId   String
+  shop        String
+  locationId  String
+  ordersCount Int       @default(0)
+  lastOrderAt DateTime?
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, locationId])
+  @@index([shop, locationId])
+}
+
+/// App-owned customer preferences. Phase 4 adds derivation and manual-edit behavior.
+model ContactPreference {
+  id          String   @id @default(cuid())
+  shop        String
+  contactId   String
+  key         String // SHIRT_SIZE | SHOE_SIZE
+  value       String
+  source      String // DERIVED | MANUAL
+  sampleCount Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, key, source])
+  @@index([shop, contactId])
+}
+
+/// Minimal Shopify staff mirror for later staff-to-home-location assignment.
+model StaffProfile {
+  id             String   @id @default(cuid())
+  shop           String
+  staffId        String
+  displayName    String?
+  homeLocationId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([shop, staffId])
 }
 
 /// A `customers/data_request` GDPR/CCPA export, held for the merchant to retrieve.
@@ -315,13 +415,13 @@ model ProcessedOrder {
 /// the data to the customer, and has 30 days to do it. Logging the payload (the previous
 /// behavior) left them with nothing to deliver, so the obligation went unmet. See DECISIONS.md §14.
 model DataRequest {
-  id                String  @id @default(cuid())
+  id                String    @id @default(cuid())
   shop              String
   shopifyCustomerId String
   customerEmail     String?
   /// JSON.stringify of the assembled CRM export for this customer.
   payload           String
-  status            String  @default("OPEN") // OPEN | RESOLVED
+  status            String    @default("OPEN") // OPEN | RESOLVED
   /// Set when a staff member marks the request as fulfilled.
   resolvedAt        DateTime?
   resolvedByStaffId String?
@@ -360,6 +460,9 @@ model ShopSettings {
 
   // Optional override of lifecycle stages (JSON-as-String array). Null => defaults.
   lifecycleStages String?
+
+  // Shop calendar timezone used to bucket POS visits into unambiguous YYYY-MM-DD strings.
+  ianaTimezone String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

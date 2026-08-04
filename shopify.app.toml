@@ -52,10 +52,11 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-# Minimal scopes for a read-only CRM mirror. `write_customers` is intentionally omitted
-# (writing CRM tags/metafields back to Shopify is the optional stretch — see DECISIONS.md §4).
+# Minimal scopes for a read-only CRM mirror plus store-location names. `write_customers` is
+# intentionally omitted (writing CRM tags/metafields back to Shopify is the optional stretch —
+# see DECISIONS.md §4). `read_locations` joins POS order attribution to the location mirror.
 # `read_all_orders` is deliberately NOT requested (requires Shopify approval).
-scopes = "read_customers,read_orders"
+scopes = "read_customers,read_orders,read_locations"
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]

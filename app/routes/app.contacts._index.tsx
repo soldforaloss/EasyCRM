@@ -15,6 +15,8 @@ import {
 } from "../lib/crm/contacts.server";
 import { addTagToContacts, listTags } from "../lib/crm/tags.server";
 import { backfillContacts } from "../lib/crm/mirror.server";
+import { enqueueJob } from "../lib/jobs/queue.server";
+import { syncLocations } from "../lib/shopify/locations.server";
 import { createSegment, deleteSegment, listSegments } from "../lib/crm/segments.server";
 import {
   contactListParamsToSearch,
@@ -78,6 +80,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     switch (intent) {
       case "resync": {
         const result = await backfillContacts(admin, shop);
+        await syncLocations(admin, shop);
+        await enqueueJob({
+          shop,
+          type: "BACKFILL_ORDERS",
+          payload: {},
+          // Bound repeated manual submissions while still allowing a later reconciliation run.
+          dedupeKey: `backfill:orders:manual:${new Date().toISOString().slice(0, 13)}`,
+          maxAttempts: 5,
+        });
         return { ok: true, toast: `Synced ${result.processed} customers from Shopify.` };
       }
       case "bulkStage": {
