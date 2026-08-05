@@ -287,9 +287,17 @@ export default function TodayPage() {
           </s-select>
           {switching ? <s-spinner accessibilityLabel="Switching store" size="base" /> : null}
           {data.selectedLocationId ? (
-            <s-badge tone="info">
-              {data.visits.length} visit{data.visits.length === 1 ? "" : "s"} today
-            </s-badge>
+            <>
+              <s-badge tone="info">
+                {data.visits.length} visit{data.visits.length === 1 ? "" : "s"} today
+              </s-badge>
+              <s-button
+                href={`/app/orders?location=${encodeURIComponent(data.selectedLocationId)}`}
+                variant="tertiary"
+              >
+                Recent orders at this store
+              </s-button>
+            </>
           ) : null}
         </s-stack>
         {!data.staffAvailable ? (

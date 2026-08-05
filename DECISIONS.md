@@ -441,3 +441,14 @@ changed.
 | `@react-router/fs-routes` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
 | `@react-router/node` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
 | `@react-router/serve` | High | Deferred | npm requires the coordinated 8.3.0 major upgrade. |
+
+## 22. Location-scoped recent orders
+
+`/app/orders` is the in-store recent-orders workflow: staff can filter by location, source and a
+shop-local date window, open the attached customer record, and log manual outreach from the row.
+The request reads accumulated `ProcessedOrder` webhook and backfill data locally, so it makes no
+Shopify API call at request time and shows only the history already present in that local record.
+
+An order without a resolved contact renders as a muted **Guest** with no contact link or outreach
+action, so guest sales do not crash the feed. Contact-backed outreach reuses the append-only manual
+activity path from §19 with session-token staff attribution; it does not send a message.
