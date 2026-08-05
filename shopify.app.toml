@@ -6,7 +6,10 @@ application_url = "https://easycrm-commonhype.fly.dev"
 embedded = true
 
 [build]
-automatically_update_urls_on_dev = true
+# false: `shopify app dev` must not silently rewrite the released app's URLs to its ephemeral
+# trycloudflare tunnel — that breaks the deployed app for everyone the moment the tunnel dies
+# (observed 2026-08-04). The CLI now asks before touching URLs; answer no for this app.
+automatically_update_urls_on_dev = false
 
 [webhooks]
 api_version = "2026-04"
