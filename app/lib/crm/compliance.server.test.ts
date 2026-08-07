@@ -37,8 +37,6 @@ describe("assembleCustomerData", () => {
       lastName: "Lovelace",
       email: "ada@example.com",
       phone: "+15551234567",
-      emailMarketingState: "SUBSCRIBED",
-      smsMarketingState: "NOT_SUBSCRIBED",
       amountSpent: 120,
       currencyCode: "USD",
       ordersCount: 2,
@@ -52,17 +50,6 @@ describe("assembleCustomerData", () => {
       tags: [{ createdAt, tag: { name: "VIP" } }],
       notes: [{ body: "Prefers text", createdAt, updatedAt: createdAt }],
       activities: [{ type: "ORDER_PLACED", occurredAt: createdAt, createdAt }],
-      messageLogs: [
-        {
-          channel: "SMS",
-          direction: "OUTBOUND",
-          subject: null,
-          bodySnapshot: "Your order is ready",
-          status: "SENT",
-          skipReason: null,
-          createdAt,
-        },
-      ],
       tasks: [
         {
           title: "Follow up",
@@ -112,13 +99,6 @@ describe("assembleCustomerData", () => {
     expect(selected).not.toHaveProperty("ownerStaffId");
     expect(selected.notes.select).toEqual({ body: true, createdAt: true, updatedAt: true });
     expect(selected.tasks.select).toMatchObject({ title: true, notes: true, status: true });
-    expect(selected.messageLogs.select).toMatchObject({
-      channel: true,
-      direction: true,
-      subject: true,
-      bodySnapshot: true,
-      status: true,
-    });
     expect(selected.processedOrders.select).toMatchObject({
       orderGid: true,
       orderName: true,
@@ -151,7 +131,6 @@ describe("assembleCustomerData", () => {
       tags: [{ tag: { name: "VIP" } }],
       notes: [{ body: "Prefers text" }],
       activities: [{ type: "ORDER_PLACED" }],
-      messageLogs: [{ channel: "SMS", bodySnapshot: "Your order is ready", status: "SENT" }],
       tasks: [{ title: "Follow up", status: "OPEN" }],
       processedOrders: [{ orderName: "#10", total: "120.00", locationId: "101" }],
       visits: [{ locationId: "101", visitDate: "2026-08-04" }],

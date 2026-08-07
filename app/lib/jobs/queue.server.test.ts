@@ -4,7 +4,6 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     job: {
       create: vi.fn(),
-      createMany: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -28,9 +27,9 @@ function job(overrides: Record<string, unknown> = {}) {
   return {
     id: "j1",
     shop: "s",
-    type: "SEND_ONE",
+    type: "BACKFILL_CUSTOMERS",
     status: "RUNNING",
-    payload: JSON.stringify({ batchId: "b1", contactId: "c1" }),
+    payload: JSON.stringify({ cursor: "page-2" }),
     dedupeKey: null,
     attempts: 1,
     maxAttempts: 3,
@@ -51,8 +50,8 @@ beforeEach(() => {
 describe("enqueueJob", () => {
   it("serializes the payload", async () => {
     prismaMock.job.create.mockResolvedValue(job());
-    await enqueueJob({ shop: "s", type: "SEND_ONE", payload: { contactId: "c1" } });
-    expect(prismaMock.job.create.mock.calls[0][0].data.payload).toBe('{"contactId":"c1"}');
+    await enqueueJob({ shop: "s", type: "BACKFILL_CUSTOMERS", payload: { cursor: "page-2" } });
+    expect(prismaMock.job.create.mock.calls[0][0].data.payload).toBe('{"cursor":"page-2"}');
   });
 
   it("returns null instead of throwing when the dedupe key collides", async () => {
@@ -70,7 +69,7 @@ describe("enqueueJob", () => {
   it("propagates unexpected database errors", async () => {
     prismaMock.job.create.mockRejectedValue(new Error("connection lost"));
     await expect(
-      enqueueJob({ shop: "s", type: "SEND_ONE", payload: {} }),
+      enqueueJob({ shop: "s", type: "BACKFILL_ORDERS", payload: {} }),
     ).rejects.toThrow("connection lost");
   });
 });
@@ -207,9 +206,6 @@ describe("renewJobLock", () => {
 
 describe("jobPayload", () => {
   it("parses the stored JSON", () => {
-    expect(jobPayload<{ contactId: string }>(job())).toEqual({
-      batchId: "b1",
-      contactId: "c1",
-    });
+    expect(jobPayload<{ cursor: string }>(job())).toEqual({ cursor: "page-2" });
   });
 });

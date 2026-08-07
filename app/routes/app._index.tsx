@@ -98,8 +98,8 @@ export default function Dashboard() {
         {recent.length === 0 ? (
           <s-stack direction="block" gap="base">
             <s-paragraph color="subdued">
-              No activity yet. As customers are synced, place orders, and you log notes or send
-              messages, the latest events will appear here.
+              No activity yet. As customers are synced, place orders, and you log notes or
+              outreach, the latest events will appear here.
             </s-paragraph>
             <s-button href="/app/contacts">Browse contacts</s-button>
           </s-stack>
@@ -159,8 +159,7 @@ export default function Dashboard() {
         <s-stack direction="block" gap="small-200">
           <s-link href="/app/contacts">Contacts</s-link>
           <s-link href="/app/tasks">Tasks</s-link>
-          <s-link href="/app/templates">Message templates</s-link>
-          <s-link href="/app/settings">Settings &amp; Brevo</s-link>
+          <s-link href="/app/settings">Settings</s-link>
         </s-stack>
       </s-section>
     </s-page>

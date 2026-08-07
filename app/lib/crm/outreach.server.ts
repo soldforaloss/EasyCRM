@@ -1,4 +1,4 @@
-/** Manual outreach logging. Records an interaction; it never sends a message. SERVER ONLY. */
+/** Manual outreach logging. Records staff-contact interactions without initiating contact. SERVER ONLY. */
 
 import prisma from "../../db.server";
 import { logActivity } from "./activity.server";

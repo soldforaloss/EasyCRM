@@ -3,7 +3,6 @@
  *
  * Deliberately DB-backed rather than Redis-backed: the app already requires Postgres, and adding
  * a second stateful dependency to a single-tenant-per-shop CRM is not worth the operational cost.
- * Throughput here is bounded by the Brevo API anyway, not by the queue.
  *
  * Concurrency safety: a job is claimed with an optimistic compare-and-set on `status`
  * (`updateMany where {id, status:"PENDING"}`). Exactly one worker's update can match, so several
@@ -15,7 +14,7 @@ import { randomUUID } from "crypto";
 import type { Job } from "@prisma/client";
 import prisma from "../../db.server";
 
-export const JOB_TYPES = ["SEND_ONE", "BACKFILL_CUSTOMERS", "BACKFILL_ORDERS"] as const;
+export const JOB_TYPES = ["BACKFILL_CUSTOMERS", "BACKFILL_ORDERS"] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ["PENDING", "RUNNING", "DONE", "FAILED"] as const;
@@ -34,8 +33,7 @@ export interface EnqueueInput {
   type: JobType;
   payload: unknown;
   /**
-   * Idempotency key, unique per shop. Re-enqueueing with the same key is a no-op, which is what
-   * makes "retry the whole batch" and at-least-once webhook delivery safe.
+   * Idempotency key, unique per shop. Re-enqueueing with the same key is a no-op.
    */
   dedupeKey?: string;
   maxAttempts?: number;
@@ -59,23 +57,6 @@ export async function enqueueJob(input: EnqueueInput): Promise<Job | null> {
     if ((error as { code?: string }).code === "P2002") return null; // duplicate dedupeKey
     throw error;
   }
-}
-
-/** Bulk enqueue. Uses `skipDuplicates` so a partially-enqueued batch can be safely replayed. */
-export async function enqueueMany(inputs: EnqueueInput[]): Promise<number> {
-  if (inputs.length === 0) return 0;
-  const result = await prisma.job.createMany({
-    data: inputs.map((input) => ({
-      shop: input.shop,
-      type: input.type,
-      payload: JSON.stringify(input.payload ?? {}),
-      dedupeKey: input.dedupeKey ?? null,
-      maxAttempts: input.maxAttempts ?? 3,
-      runAt: input.runAt ?? new Date(),
-    })),
-    skipDuplicates: true,
-  });
-  return result.count;
 }
 
 /**
@@ -171,7 +152,7 @@ export function jobPayload<T>(job: Job): T {
   return JSON.parse(job.payload) as T;
 }
 
-/** Queue depth by status, for the health endpoint and the bulk-send UI. */
+/** Queue depth by status for the health endpoint. */
 export async function queueStats(shop?: string) {
   const rows = await prisma.job.groupBy({
     by: ["status"],

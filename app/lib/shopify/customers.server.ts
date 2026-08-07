@@ -44,22 +44,18 @@ export interface MirrorCustomerNode {
   lastName: string | null;
   email: string | null;
   phone: string | null;
-  /** Shopify CustomerEmailMarketingState — mirrored so the send gate can enforce consent. */
-  emailMarketingState: string | null;
-  /** Shopify CustomerSmsMarketingState — mirrored so the send gate can enforce consent. */
-  smsMarketingState: string | null;
   numberOfOrders: string; // GraphQL returns UnsignedInt64 as string
   amountSpent: { amount: string; currencyCode: string } | null;
   createdAt: string;
 }
 
-/** Raw GraphQL shape — marketing consent is nested, so it is flattened into MirrorCustomerNode. */
+/** Raw GraphQL shape, flattened into MirrorCustomerNode. */
 interface RawMirrorCustomerNode {
   id: string;
   firstName: string | null;
   lastName: string | null;
-  defaultEmailAddress: { emailAddress: string | null; marketingState: string | null } | null;
-  defaultPhoneNumber: { phoneNumber: string | null; marketingState: string | null } | null;
+  defaultEmailAddress: { emailAddress: string | null } | null;
+  defaultPhoneNumber: { phoneNumber: string | null } | null;
   numberOfOrders: string;
   amountSpent: { amount: string; currencyCode: string } | null;
   createdAt: string;
@@ -80,8 +76,8 @@ const CUSTOMERS_PAGE_QUERY = `#graphql
         id
         firstName
         lastName
-        defaultEmailAddress { emailAddress marketingState }
-        defaultPhoneNumber { phoneNumber marketingState }
+        defaultEmailAddress { emailAddress }
+        defaultPhoneNumber { phoneNumber }
         numberOfOrders
         amountSpent { amount currencyCode }
         createdAt
@@ -96,8 +92,6 @@ function toMirrorNode(c: RawMirrorCustomerNode): MirrorCustomerNode {
     lastName: c.lastName,
     email: c.defaultEmailAddress?.emailAddress ?? null,
     phone: c.defaultPhoneNumber?.phoneNumber ?? null,
-    emailMarketingState: c.defaultEmailAddress?.marketingState ?? null,
-    smsMarketingState: c.defaultPhoneNumber?.marketingState ?? null,
     numberOfOrders: c.numberOfOrders,
     amountSpent: c.amountSpent,
     createdAt: c.createdAt,
@@ -153,13 +147,10 @@ export interface LiveCustomer {
   email: string | null;
   phone: string | null;
   note: string | null;
-  verifiedEmail: boolean | null;
   createdAt: string;
   updatedAt: string;
   numberOfOrders: string;
   amountSpent: { amount: string; currencyCode: string } | null;
-  emailMarketingState: string | null;
-  smsMarketingState: string | null;
   defaultAddress: LiveAddress | null;
   tags: string[];
   /** ISO date of the customer's earliest order (for tenure / order frequency). */
@@ -191,13 +182,12 @@ interface CustomerDetailData {
         firstName: string | null;
         lastName: string | null;
         note: string | null;
-        verifiedEmail: boolean | null;
         createdAt: string;
         updatedAt: string;
         numberOfOrders: string;
         amountSpent: { amount: string; currencyCode: string } | null;
-        defaultEmailAddress: { emailAddress: string | null; marketingState: string | null } | null;
-        defaultPhoneNumber: { phoneNumber: string | null; marketingState: string | null } | null;
+        defaultEmailAddress: { emailAddress: string | null } | null;
+        defaultPhoneNumber: { phoneNumber: string | null } | null;
         defaultAddress: LiveAddress | null;
         tags: string[];
         firstOrder: { nodes: Array<{ createdAt: string }> };
@@ -220,13 +210,12 @@ const CUSTOMER_DETAIL_QUERY = `#graphql
       firstName
       lastName
       note
-      verifiedEmail
       createdAt
       updatedAt
       numberOfOrders
       amountSpent { amount currencyCode }
-      defaultEmailAddress { emailAddress marketingState }
-      defaultPhoneNumber { phoneNumber marketingState }
+      defaultEmailAddress { emailAddress }
+      defaultPhoneNumber { phoneNumber }
       tags
       defaultAddress {
         formatted
@@ -277,13 +266,10 @@ export async function fetchCustomerDetail(
     email: c.defaultEmailAddress?.emailAddress ?? null,
     phone: c.defaultPhoneNumber?.phoneNumber ?? null,
     note: c.note,
-    verifiedEmail: c.verifiedEmail,
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     numberOfOrders: c.numberOfOrders,
     amountSpent: c.amountSpent,
-    emailMarketingState: c.defaultEmailAddress?.marketingState ?? null,
-    smsMarketingState: c.defaultPhoneNumber?.marketingState ?? null,
     defaultAddress: c.defaultAddress,
     tags: c.tags ?? [],
     firstOrderAt: c.firstOrder?.nodes[0]?.createdAt ?? null,
@@ -312,9 +298,6 @@ export interface CustomerSyncFields {
   currencyCode: string | null;
   numberOfOrders: number;
   lastOrderAt: string | null;
-  /** Current marketing consent — refreshed on every customers/* webhook so opt-outs land fast. */
-  emailMarketingState: string | null;
-  smsMarketingState: string | null;
 }
 
 interface CustomerSyncData {
@@ -322,8 +305,6 @@ interface CustomerSyncData {
     numberOfOrders: string;
     amountSpent: { amount: string; currencyCode: string } | null;
     lastOrder: { createdAt: string } | null;
-    defaultEmailAddress: { marketingState: string | null } | null;
-    defaultPhoneNumber: { marketingState: string | null } | null;
   } | null;
 }
 
@@ -333,12 +314,10 @@ const CUSTOMER_SYNC_QUERY = `#graphql
       numberOfOrders
       amountSpent { amount currencyCode }
       lastOrder { createdAt }
-      defaultEmailAddress { marketingState }
-      defaultPhoneNumber { marketingState }
     }
   }`;
 
-/** Fetch authoritative spend/orders/last-order/consent for one customer (webhook refresh). */
+/** Fetch authoritative spend, order count, and last-order data for one customer. */
 export async function fetchCustomerSyncFields(
   admin: AdminGraphqlClient,
   customerGid: string,
@@ -353,8 +332,6 @@ export async function fetchCustomerSyncFields(
     currencyCode: data.customer.amountSpent?.currencyCode ?? null,
     numberOfOrders: Number.parseInt(data.customer.numberOfOrders, 10) || 0,
     lastOrderAt: data.customer.lastOrder?.createdAt ?? null,
-    emailMarketingState: data.customer.defaultEmailAddress?.marketingState ?? null,
-    smsMarketingState: data.customer.defaultPhoneNumber?.marketingState ?? null,
   };
 }
 

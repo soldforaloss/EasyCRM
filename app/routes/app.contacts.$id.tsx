@@ -13,7 +13,12 @@ import {
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getContact, setLifecycleStage } from "../lib/crm/contacts.server";
-import { addNote, deleteNote, editNote, listNotes } from "../lib/crm/notes.server";
+import {
+  addNote,
+  deleteNote,
+  editNote,
+  listNotes,
+} from "../lib/crm/notes.server";
 import {
   listActivities,
   parseActivityPayload,
@@ -23,21 +28,10 @@ import { createTask, listTasks, setTaskStatus } from "../lib/crm/tasks.server";
 import { staffIdFromSessionToken } from "../lib/staff.server";
 import { fetchCustomerDetail } from "../lib/shopify/customers.server";
 import {
-  buildMergeVarsMap,
-  listMessageLogs,
-  sendToContact,
-} from "../lib/crm/messaging.server";
-import { listTemplates } from "../lib/crm/templates.server";
-import { getBrevoStatus } from "../lib/crm/settings.server";
-import {
   ACTIVITY_TYPE_META,
   CONTACT_PREFERENCE_KEYS,
   isActivityType,
-  isChannel,
   isContactPreferenceKey,
-  consentLabel,
-  consentTone,
-  hasMarketingConsent,
   type BadgeTone,
   type ContactPreferenceKey,
 } from "../lib/crm/constants";
@@ -52,12 +46,10 @@ import {
 } from "../lib/format";
 import { computeInsights } from "../lib/crm/insights";
 import { StageBadge, TaskStatusBadge } from "../components/badges";
-import { ComposeMessage } from "../components/compose";
 import { NotesPanel } from "../components/notes-panel";
 import { TasksPanel } from "../components/tasks-panel";
 import { TagEditor } from "../components/tag-editor";
 import { StageSelector } from "../components/stage-selector";
-import { SmsThread, EmailThread } from "../components/message-thread";
 import { useActionToast } from "../lib/use-action-toast";
 import type { loader as ordersLoader } from "./app.contacts.$id_.orders";
 import prisma from "../db.server";
@@ -81,83 +73,84 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   let live = null;
   let liveError: string | null = null;
   try {
-    live = await fetchCustomerDetail(admin, contact.shopifyCustomerId, { orders: 10 });
+    live = await fetchCustomerDetail(admin, contact.shopifyCustomerId, {
+      orders: 10,
+    });
     if (!live) liveError = "This customer no longer exists in Shopify.";
   } catch (error) {
-    liveError = error instanceof Error ? error.message : "Could not load live customer data.";
+    liveError =
+      error instanceof Error
+        ? error.message
+        : "Could not load live customer data.";
   }
 
   const [
     notes,
     activities,
     tasks,
-    templates,
-    brevoStatus,
-    varsMap,
-    messages,
     settings,
     candidateVisits,
     contactLocations,
     preferences,
     locations,
     lastOutreach,
-  ] =
-    await Promise.all([
-      listNotes(shop, contact.id),
-      listActivities(shop, contact.id, 100),
-      listTasks(shop, { contactId: contact.id }),
-      listTemplates(shop),
-      getBrevoStatus(shop),
-      buildMergeVarsMap(shop, [contact]),
-      listMessageLogs(shop, contact.id),
-      prisma.shopSettings.findUnique({
-        where: { shop },
-        select: { ianaTimezone: true },
-      }),
-      prisma.visit.findMany({
-        where: {
-          shop,
-          contactId: contact.id,
-          visitDate: { in: visitDateCandidates },
-        },
-        orderBy: { createdAt: "desc" },
-        select: { locationId: true, visitDate: true },
-      }),
-      prisma.contactLocation.findMany({
-        where: { shop, contactId: contact.id },
-        orderBy: [{ ordersCount: "desc" }, { lastOrderAt: "desc" }],
-        select: { locationId: true, ordersCount: true },
-      }),
-      prisma.contactPreference.findMany({
-        where: { shop, contactId: contact.id },
-        select: { key: true, value: true, source: true, sampleCount: true },
-      }),
-      prisma.location.findMany({
-        where: { shop },
-        select: { legacyId: true, name: true },
-      }),
-      prisma.activity.findFirst({
-        where: {
-          shop,
-          contactId: contact.id,
-          type: { in: ["OUTREACH_CALL", "OUTREACH_IN_PERSON", "OUTREACH_TEXT"] },
-        },
-        orderBy: { occurredAt: "desc" },
-        select: { type: true, occurredAt: true },
-      }),
-    ]);
+  ] = await Promise.all([
+    listNotes(shop, contact.id),
+    listActivities(shop, contact.id, 100),
+    listTasks(shop, { contactId: contact.id }),
+    prisma.shopSettings.findUnique({
+      where: { shop },
+      select: { ianaTimezone: true },
+    }),
+    prisma.visit.findMany({
+      where: {
+        shop,
+        contactId: contact.id,
+        visitDate: { in: visitDateCandidates },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { locationId: true, visitDate: true },
+    }),
+    prisma.contactLocation.findMany({
+      where: { shop, contactId: contact.id },
+      orderBy: [{ ordersCount: "desc" }, { lastOrderAt: "desc" }],
+      select: { locationId: true, ordersCount: true },
+    }),
+    prisma.contactPreference.findMany({
+      where: { shop, contactId: contact.id },
+      select: { key: true, value: true, source: true, sampleCount: true },
+    }),
+    prisma.location.findMany({
+      where: { shop },
+      select: { legacyId: true, name: true },
+    }),
+    prisma.activity.findFirst({
+      where: {
+        shop,
+        contactId: contact.id,
+        type: { in: ["OUTREACH_CALL", "OUTREACH_IN_PERSON", "OUTREACH_TEXT"] },
+      },
+      orderBy: { occurredAt: "desc" },
+      select: { type: true, occurredAt: true },
+    }),
+  ]);
 
   const numericId = contact.shopifyCustomerId.split("/").pop();
   const locationNames = new Map(
     locations.map((location) => [location.legacyId, location.name]),
   );
   const today = dateStringInTz(now, settings?.ianaTimezone ?? null);
-  const todayVisit = candidateVisits.find((visit) => visit.visitDate === today) ?? null;
+  const todayVisit =
+    candidateVisits.find((visit) => visit.visitDate === today) ?? null;
 
   const insights = live
     ? computeInsights({
-        amountSpent: live.amountSpent ? Number(live.amountSpent.amount) : contact.amountSpent,
-        numberOfOrders: live.numberOfOrders ? Number(live.numberOfOrders) : contact.ordersCount,
+        amountSpent: live.amountSpent
+          ? Number(live.amountSpent.amount)
+          : contact.amountSpent,
+        numberOfOrders: live.numberOfOrders
+          ? Number(live.numberOfOrders)
+          : contact.ordersCount,
         customerSince: live.createdAt,
         firstOrderAt: live.firstOrderAt,
         lastOrderAt: live.lastOrderAt,
@@ -174,9 +167,6 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       lastName: contact.lastName,
       email: contact.email,
       phone: contact.phone,
-      // Mirrored consent — the fallback the UI gates on when the live Shopify read is unavailable.
-      emailMarketingState: contact.emailMarketingState,
-      smsMarketingState: contact.smsMarketingState,
       stage: contact.lifecycleStage,
       source: contact.source,
       ordersCount: contact.ordersCount,
@@ -187,7 +177,11 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     },
     live,
     liveError,
-    notes: notes.map((n) => ({ id: n.id, body: n.body, createdAt: n.createdAt })),
+    notes: notes.map((n) => ({
+      id: n.id,
+      body: n.body,
+      createdAt: n.createdAt,
+    })),
     timeline: activities.map((a) => ({
       id: a.id,
       type: a.type,
@@ -200,31 +194,13 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       status: t.status,
       dueAt: t.dueAt,
     })),
-    messages: messages.map((m) => ({
-      id: m.id,
-      channel: m.channel,
-      direction: m.direction,
-      subject: m.subject,
-      bodySnapshot: m.bodySnapshot,
-      status: m.status,
-      error: m.error,
-      createdAt: m.createdAt,
-    })),
-    templates: templates.map((t) => ({
-      id: t.id,
-      name: t.name,
-      channel: t.channel,
-      subject: t.subject,
-      body: t.body,
-    })),
-    brevoConnected: brevoStatus.connected,
-    todayVisit:
-      todayVisit
-        ? {
-            locationId: todayVisit.locationId,
-            locationName: locationNames.get(todayVisit.locationId) ?? "Unknown store",
-          }
-        : null,
+    todayVisit: todayVisit
+      ? {
+          locationId: todayVisit.locationId,
+          locationName:
+            locationNames.get(todayVisit.locationId) ?? "Unknown store",
+        }
+      : null,
     shopsAt: contactLocations.map((row) => ({
       locationId: row.locationId,
       locationName: locationNames.get(row.locationId) ?? "Unknown store",
@@ -232,10 +208,12 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     })),
     preferences: CONTACT_PREFERENCE_KEYS.map((key) => {
       const derived = preferences.find(
-        (preference) => preference.key === key && preference.source === "DERIVED",
+        (preference) =>
+          preference.key === key && preference.source === "DERIVED",
       );
       const manual = preferences.find(
-        (preference) => preference.key === key && preference.source === "MANUAL",
+        (preference) =>
+          preference.key === key && preference.source === "MANUAL",
       );
       return {
         key,
@@ -247,7 +225,6 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       };
     }),
     lastOutreach,
-    previewVars: varsMap.get(contact.id) ?? {},
     shopifyCustomerUrl: `https://${shop}/admin/customers/${numericId}`,
     shop,
   };
@@ -264,7 +241,11 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   try {
     switch (intent) {
       case "setStage":
-        await setLifecycleStage(shop, contactId, String(form.get("stage") ?? ""));
+        await setLifecycleStage(
+          shop,
+          contactId,
+          String(form.get("stage") ?? ""),
+        );
         return { ok: true, toast: "Lifecycle stage updated." };
       case "addNote":
         await addNote(shop, contactId, String(form.get("body") ?? ""), staffId);
@@ -295,16 +276,28 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         return { ok: true, toast: "Manual size override cleared." };
       }
       case "editNote":
-        await editNote(shop, String(form.get("noteId") ?? ""), String(form.get("body") ?? ""));
+        await editNote(
+          shop,
+          String(form.get("noteId") ?? ""),
+          String(form.get("body") ?? ""),
+        );
         return { ok: true, toast: "Note updated." };
       case "deleteNote":
         await deleteNote(shop, String(form.get("noteId") ?? ""));
         return { ok: true, toast: "Note deleted." };
       case "addTag":
-        await addTagToContact(shop, contactId, String(form.get("tagName") ?? ""));
+        await addTagToContact(
+          shop,
+          contactId,
+          String(form.get("tagName") ?? ""),
+        );
         return { ok: true, toast: "Tag added." };
       case "removeTag":
-        await removeTagFromContact(shop, contactId, String(form.get("tagId") ?? ""));
+        await removeTagFromContact(
+          shop,
+          contactId,
+          String(form.get("tagId") ?? ""),
+        );
         return { ok: true, toast: "Tag removed." };
       case "createTask": {
         const due = String(form.get("dueAt") ?? "").trim();
@@ -323,33 +316,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           form.get("status") === "DONE" ? "DONE" : "OPEN",
         );
         return { ok: true, toast: "Task updated." };
-      case "sendMessage": {
-        const channel = String(form.get("channel") ?? "");
-        if (!isChannel(channel)) return { ok: false, toast: "Choose a channel." };
-        const outcome = await sendToContact(shop, {
-          contactId,
-          channel,
-          subject: String(form.get("subject") ?? ""),
-          body: String(form.get("body") ?? ""),
-          sentByStaffId: staffId,
-        });
-        if (outcome.ok) return { ok: true, toast: "Message sent." };
-        // A consent skip is an expected outcome, not an error — say so plainly rather than
-        // surfacing it as a failed send.
-        if (outcome.status === "SKIPPED" && outcome.skipReason === "NO_CONSENT") {
-          return {
-            ok: false,
-            toast:
-              "Not sent — this customer isn't subscribed to marketing in Shopify. The attempt was recorded on their timeline.",
-          };
-        }
-        return { ok: false, toast: outcome.error ?? "Send failed." };
-      }
       default:
         return { ok: false, toast: "Unknown action." };
     }
   } catch (error) {
-    return { ok: false, toast: error instanceof Error ? error.message : "Action failed." };
+    return {
+      ok: false,
+      toast: error instanceof Error ? error.message : "Action failed.",
+    };
   }
 };
 
@@ -385,12 +359,6 @@ function describeTimeline(item: {
       return `${p.orderName ?? "Order"}${p.total ? ` · ${p.total} ${p.currency ?? ""}` : ""}`;
     case "STAGE_CHANGED":
       return `${p.from ?? "?"} → ${p.to ?? "?"}`;
-    case "EMAIL_SENT":
-    case "SMS_SENT":
-      return String(p.subject ?? p.preview ?? "Message sent");
-    case "EMAIL_RECEIVED":
-    case "SMS_RECEIVED":
-      return String(p.subject ?? p.preview ?? "Message received");
     case "TASK":
       return `${p.title ?? "Task"} (${p.action ?? "updated"})`;
     case "OUTREACH_CALL":
@@ -405,7 +373,6 @@ function describeTimeline(item: {
 const TABS = [
   "Summary",
   "Orders",
-  "Messages",
   "Activity",
   "Notes & Tasks",
   "Details",
@@ -421,11 +388,6 @@ const ACTIVITY_FILTERS: ReadonlyArray<{
   { id: "NOTE", label: "Notes", types: ["NOTE"] },
   { id: "ORDER", label: "Orders", types: ["ORDER_PLACED"] },
   {
-    id: "MESSAGE",
-    label: "Messages",
-    types: ["EMAIL_SENT", "SMS_SENT", "EMAIL_RECEIVED", "SMS_RECEIVED"],
-  },
-  {
     id: "OUTREACH",
     label: "Outreach",
     types: ["OUTREACH_CALL", "OUTREACH_IN_PERSON", "OUTREACH_TEXT"],
@@ -434,9 +396,22 @@ const ACTIVITY_FILTERS: ReadonlyArray<{
   { id: "STAGE", label: "Stage", types: ["STAGE_CHANGED"] },
 ];
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function Stat({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
   return (
-    <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
+    <s-box
+      padding="base"
+      borderWidth="base"
+      borderRadius="base"
+      background="subdued"
+    >
       <s-stack direction="block" gap="small-500" alignItems="center">
         <s-text color="subdued">{label}</s-text>
         <s-heading>{value}</s-heading>
@@ -615,13 +590,6 @@ export default function ContactDetail() {
   const { contact, live, insights } = data;
   useActionToast(actionData);
 
-  // Marketing consent. The live Shopify value is authoritative when we have it; the mirrored
-  // value is the fallback, and is what the server-side gate will actually evaluate.
-  const emailConsentState = live?.emailMarketingState ?? contact.emailMarketingState;
-  const smsConsentState = live?.smsMarketingState ?? contact.smsMarketingState;
-  const emailAllowed = hasMarketingConsent(emailConsentState);
-  const smsAllowed = hasMarketingConsent(smsConsentState);
-
   const [tab, setTab] = useState<Tab>("Summary");
   const [activityFilter, setActivityFilter] = useState<string>("ALL");
 
@@ -650,7 +618,9 @@ export default function ContactDetail() {
   const loadingMore = ordersFetcher.state !== "idle";
   function loadMoreOrders() {
     if (cursor.endCursor) {
-      ordersFetcher.load(`/app/contacts/${contact.id}/orders?after=${cursor.endCursor}`);
+      ordersFetcher.load(
+        `/app/contacts/${contact.id}/orders?after=${cursor.endCursor}`,
+      );
     }
   }
 
@@ -658,7 +628,9 @@ export default function ContactDetail() {
   const liveSpent = live?.amountSpent
     ? formatMoney(Number(live.amountSpent.amount), currency)
     : formatMoney(contact.amountSpent, currency);
-  const liveOrderCount = live ? Number(live.numberOfOrders) : contact.ordersCount;
+  const liveOrderCount = live
+    ? Number(live.numberOfOrders)
+    : contact.ordersCount;
   const location = [
     live?.defaultAddress?.city,
     live?.defaultAddress?.province || live?.defaultAddress?.country,
@@ -667,7 +639,8 @@ export default function ContactDetail() {
     .join(", ");
 
   const activeFilter =
-    ACTIVITY_FILTERS.find((f) => f.id === activityFilter) ?? ACTIVITY_FILTERS[0];
+    ACTIVITY_FILTERS.find((f) => f.id === activityFilter) ??
+    ACTIVITY_FILTERS[0];
   const filteredTimeline = activeFilter.types
     ? data.timeline.filter((t) => activeFilter.types!.includes(t.type))
     : data.timeline;
@@ -675,15 +648,16 @@ export default function ContactDetail() {
   const recentOrders = allOrders.slice(0, 3);
   const recentActivity = data.timeline.slice(0, 5);
   const openTasks = data.tasks.filter((t) => t.status !== "DONE");
-  const emailMessages = data.messages.filter((m) => m.channel === "EMAIL");
-  const smsMessages = data.messages.filter((m) => m.channel === "SMS");
-
   return (
     <s-page heading={contact.name}>
       <s-link slot="breadcrumb-actions" href="/app/contacts">
         Contacts
       </s-link>
-      <s-button slot="primary-action" href={data.shopifyCustomerUrl} target="_blank">
+      <s-button
+        slot="primary-action"
+        href={data.shopifyCustomerUrl}
+        target="_blank"
+      >
         View in Shopify
       </s-button>
 
@@ -696,14 +670,29 @@ export default function ContactDetail() {
       {/* Identity header ------------------------------------------------- */}
       <s-section>
         <s-stack direction="block" gap="base" alignItems="center">
-          <s-stack direction="inline" gap="base" alignItems="center" justifyContent="center">
-            <s-avatar initials={initials(contact.firstName, contact.lastName)} size="base" alt={contact.name} />
+          <s-stack
+            direction="inline"
+            gap="base"
+            alignItems="center"
+            justifyContent="center"
+          >
+            <s-avatar
+              initials={initials(contact.firstName, contact.lastName)}
+              size="base"
+              alt={contact.name}
+            />
             <s-stack direction="block" gap="small-500">
-              <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="center">
+              <s-stack
+                direction="inline"
+                gap="small-200"
+                alignItems="center"
+                justifyContent="center"
+              >
                 <s-heading>{contact.name}</s-heading>
                 <StageBadge stage={contact.stage} />
-                {live?.verifiedEmail ? <s-badge tone="success">Verified email</s-badge> : null}
-                {insights?.atRisk ? <s-badge tone="critical">At risk</s-badge> : null}
+                {insights?.atRisk ? (
+                  <s-badge tone="critical">At risk</s-badge>
+                ) : null}
                 {data.todayVisit ? (
                   <s-badge tone="success">
                     Visited today - {data.todayVisit.locationName}
@@ -712,11 +701,15 @@ export default function ContactDetail() {
               </s-stack>
               <s-stack direction="inline" gap="base" justifyContent="center">
                 {contact.email ? (
-                  <s-link href={`mailto:${contact.email}`}>{contact.email}</s-link>
+                  <s-link href={`mailto:${contact.email}`}>
+                    {contact.email}
+                  </s-link>
                 ) : (
                   <s-text color="subdued">No email</s-text>
                 )}
-                {contact.phone ? <s-link href={`tel:${contact.phone}`}>{contact.phone}</s-link> : null}
+                {contact.phone ? (
+                  <s-link href={`tel:${contact.phone}`}>{contact.phone}</s-link>
+                ) : null}
                 {location ? <s-text color="subdued">{location}</s-text> : null}
               </s-stack>
             </s-stack>
@@ -735,7 +728,8 @@ export default function ContactDetail() {
               {data.preferences.map((preference) =>
                 preference.effectiveValue ? (
                   <s-badge key={preference.key} tone="info">
-                    {preferenceLabel(preference.key)} {preference.effectiveValue}
+                    {preferenceLabel(preference.key)}{" "}
+                    {preference.effectiveValue}
                   </s-badge>
                 ) : null,
               )}
@@ -746,10 +740,16 @@ export default function ContactDetail() {
 
       {/* KPI bar --------------------------------------------------------- */}
       <s-section>
-        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(160px, 1fr))" gap="base">
+        <s-grid
+          gridTemplateColumns="repeat(auto-fit, minmax(160px, 1fr))"
+          gap="base"
+        >
           <Stat label="Lifetime value" value={liveSpent} />
           <Stat label="Orders" value={String(liveOrderCount)} />
-          <Stat label="Avg order value" value={insights ? formatMoney(insights.aov, currency) : "—"} />
+          <Stat
+            label="Avg order value"
+            value={insights ? formatMoney(insights.aov, currency) : "—"}
+          />
           <Stat
             label="Last order"
             value={live?.lastOrderAt ? formatDate(live.lastOrderAt) : "—"}
@@ -762,14 +762,20 @@ export default function ContactDetail() {
           <Stat
             label="Customer since"
             value={live ? formatDate(live.createdAt) : "—"}
-            sub={insights?.tenureDays != null ? formatDurationDays(insights.tenureDays) : undefined}
+            sub={
+              insights?.tenureDays != null
+                ? formatDurationDays(insights.tenureDays)
+                : undefined
+            }
           />
           <Stat
             label="Order frequency"
-            value={insights?.avgDaysBetweenOrders != null ? `~${insights.avgDaysBetweenOrders} days` : "—"}
+            value={
+              insights?.avgDaysBetweenOrders != null
+                ? `~${insights.avgDaysBetweenOrders} days`
+                : "—"
+            }
           />
-          <Stat label="Email marketing" value={live?.emailMarketingState ?? "—"} />
-          <Stat label="SMS marketing" value={live?.smsMarketingState ?? "—"} />
         </s-grid>
       </s-section>
 
@@ -792,11 +798,14 @@ export default function ContactDetail() {
       {tab === "Summary" && (
         <>
           {insights?.atRisk && (
-            <s-banner tone="warning" heading="This customer may be at risk of churning">
+            <s-banner
+              tone="warning"
+              heading="This customer may be at risk of churning"
+            >
               <s-paragraph>
-                No order in {formatDurationDays(insights.daysSinceLastOrder)}, well beyond their
-                usual ~{insights.avgDaysBetweenOrders}-day cadence. Consider a re-engagement
-                message.
+                No order in {formatDurationDays(insights.daysSinceLastOrder)},
+                well beyond their usual ~{insights.avgDaysBetweenOrders}-day
+                cadence. Consider a re-engagement follow-up.
               </s-paragraph>
             </s-banner>
           )}
@@ -812,7 +821,9 @@ export default function ContactDetail() {
                     </s-badge>
                   ))
                 ) : (
-                  <s-text color="subdued">No attributed store purchases yet.</s-text>
+                  <s-text color="subdued">
+                    No attributed store purchases yet.
+                  </s-text>
                 )}
               </s-stack>
               <s-text>
@@ -830,7 +841,12 @@ export default function ContactDetail() {
             <s-section heading="Top products">
               <s-stack direction="block" gap="small-200">
                 {insights.topProducts.map((p) => (
-                  <s-stack key={p.title} direction="inline" gap="base" alignItems="center">
+                  <s-stack
+                    key={p.title}
+                    direction="inline"
+                    gap="base"
+                    alignItems="center"
+                  >
                     <s-text type="strong">{p.title}</s-text>
                     <s-text color="subdued">×{p.quantity}</s-text>
                   </s-stack>
@@ -847,15 +863,29 @@ export default function ContactDetail() {
                 {recentOrders.map((o) => {
                   const oid = o.id.split("/").pop();
                   return (
-                    <s-box key={o.id} padding="small-200" borderRadius="base" background="subdued">
-                      <s-stack direction="inline" gap="base" alignItems="center">
-                        <s-link href={`https://${data.shop}/admin/orders/${oid}`} target="_blank">
+                    <s-box
+                      key={o.id}
+                      padding="small-200"
+                      borderRadius="base"
+                      background="subdued"
+                    >
+                      <s-stack
+                        direction="inline"
+                        gap="base"
+                        alignItems="center"
+                      >
+                        <s-link
+                          href={`https://${data.shop}/admin/orders/${oid}`}
+                          target="_blank"
+                        >
                           {o.name}
                         </s-link>
                         <s-badge tone={financialTone(o.displayFinancialStatus)}>
                           {o.displayFinancialStatus ?? "—"}
                         </s-badge>
-                        <s-text color="subdued">{formatDate(o.createdAt)}</s-text>
+                        <s-text color="subdued">
+                          {formatDate(o.createdAt)}
+                        </s-text>
                         <s-text type="strong">
                           {o.totalPriceSet
                             ? formatMoney(
@@ -881,15 +911,28 @@ export default function ContactDetail() {
             ) : (
               <s-stack direction="block" gap="small-200">
                 {recentActivity.map((item) => (
-                  <s-stack key={item.id} direction="inline" gap="base" alignItems="center">
+                  <s-stack
+                    key={item.id}
+                    direction="inline"
+                    gap="base"
+                    alignItems="center"
+                  >
                     <s-icon
-                      type={isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].icon : "info"}
+                      type={
+                        isActivityType(item.type)
+                          ? ACTIVITY_TYPE_META[item.type].icon
+                          : "info"
+                      }
                     />
                     <s-text type="strong">
-                      {isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].label : "Activity"}
+                      {isActivityType(item.type)
+                        ? ACTIVITY_TYPE_META[item.type].label
+                        : "Activity"}
                     </s-text>
                     <s-text>{describeTimeline(item)}</s-text>
-                    <s-text color="subdued">{formatDateTime(item.occurredAt)}</s-text>
+                    <s-text color="subdued">
+                      {formatDateTime(item.occurredAt)}
+                    </s-text>
                   </s-stack>
                 ))}
                 <s-button variant="tertiary" onClick={() => setTab("Activity")}>
@@ -903,10 +946,17 @@ export default function ContactDetail() {
             <s-section heading="Open tasks">
               <s-stack direction="block" gap="small-200">
                 {openTasks.map((t) => (
-                  <s-stack key={t.id} direction="inline" gap="base" alignItems="center">
+                  <s-stack
+                    key={t.id}
+                    direction="inline"
+                    gap="base"
+                    alignItems="center"
+                  >
                     <TaskStatusBadge status={t.status} />
                     <s-text type="strong">{t.title}</s-text>
-                    {t.dueAt ? <s-text color="subdued">Due {formatDate(t.dueAt)}</s-text> : null}
+                    {t.dueAt ? (
+                      <s-text color="subdued">Due {formatDate(t.dueAt)}</s-text>
+                    ) : null}
                   </s-stack>
                 ))}
               </s-stack>
@@ -914,31 +964,6 @@ export default function ContactDetail() {
           )}
 
           <LogOutreachCard />
-
-          {data.brevoConnected && (
-            <s-section heading="Send a message">
-            {data.brevoConnected && !emailAllowed && !smsAllowed ? (
-              <s-banner tone="warning">
-                <s-paragraph>
-                  This customer is not subscribed to email or SMS marketing in Shopify, so Easy CRM
-                  will not message them. If they re-subscribe, the status syncs back here
-                  automatically.
-                </s-paragraph>
-              </s-banner>
-            ) : null}
-            <ComposeMessage
-              heading="Send a message"
-              // Consent gates the channel in the UI as well as on the server, so the merchant
-              // is never offered a send that would only be recorded as skipped.
-              canEmail={Boolean(contact.email) && emailAllowed}
-              canSms={Boolean(contact.phone) && smsAllowed}
-              previewVars={data.previewVars}
-              templates={data.templates}
-              actionValue="sendMessage"
-              submitLabel="Send message"
-            />
-            </s-section>
-          )}
         </>
       )}
 
@@ -947,8 +972,8 @@ export default function ContactDetail() {
         <s-section heading="Order history">
           {allOrders.length === 0 ? (
             <s-paragraph color="subdued">
-              No orders in the last 60 days. (Older orders require a broader Shopify scope — see
-              DECISIONS.md.)
+              No orders in the last 60 days. (Older orders require a broader
+              Shopify scope — see DECISIONS.md.)
             </s-paragraph>
           ) : (
             <s-stack direction="block" gap="base">
@@ -967,25 +992,38 @@ export default function ContactDetail() {
                     return (
                       <s-table-row key={o.id}>
                         <s-table-cell>
-                          <s-link href={`https://${data.shop}/admin/orders/${oid}`} target="_blank">
+                          <s-link
+                            href={`https://${data.shop}/admin/orders/${oid}`}
+                            target="_blank"
+                          >
                             {o.name}
                           </s-link>
                         </s-table-cell>
                         <s-table-cell>{formatDate(o.createdAt)}</s-table-cell>
                         <s-table-cell>
-                          <s-badge tone={financialTone(o.displayFinancialStatus)}>
+                          <s-badge
+                            tone={financialTone(o.displayFinancialStatus)}
+                          >
                             {o.displayFinancialStatus ?? "—"}
                           </s-badge>
                         </s-table-cell>
-                        <s-table-cell>{o.displayFulfillmentStatus ?? "—"}</s-table-cell>
+                        <s-table-cell>
+                          {o.displayFulfillmentStatus ?? "—"}
+                        </s-table-cell>
                         <s-table-cell>
                           {o.lineItems.length > 0 ? (
                             <s-stack direction="block" gap="small-500">
                               {o.lineItems.map((item, index) => (
-                                <s-text key={`${item.sku ?? item.title}-${index}`}>
+                                <s-text
+                                  key={`${item.sku ?? item.title}-${index}`}
+                                >
                                   {item.title}
-                                  {item.variantTitle ? ` - ${item.variantTitle}` : ""}
-                                  {item.quantity > 1 ? ` x${item.quantity}` : ""}
+                                  {item.variantTitle
+                                    ? ` - ${item.variantTitle}`
+                                    : ""}
+                                  {item.quantity > 1
+                                    ? ` x${item.quantity}`
+                                    : ""}
                                 </s-text>
                               ))}
                             </s-stack>
@@ -1020,60 +1058,6 @@ export default function ContactDetail() {
         </s-section>
       )}
 
-      {/* MESSAGES -------------------------------------------------------- */}
-      {tab === "Messages" && (
-        <>
-          <s-section>
-            <s-stack direction="block" alignItems="center">
-              <s-text color="subdued">
-                Conversation with this contact — your messages on the right, their replies on the
-                left. Set up reply capture in Settings → Receiving messages.
-              </s-text>
-            </s-stack>
-          </s-section>
-
-          <s-section heading="Text messages">
-            <SmsThread messages={smsMessages} />
-          </s-section>
-
-          <s-section heading="Emails">
-            <EmailThread messages={emailMessages} />
-          </s-section>
-
-          <s-section heading="Send a message">
-            {data.brevoConnected && !emailAllowed && !smsAllowed ? (
-              <s-banner tone="warning">
-                <s-paragraph>
-                  This customer is not subscribed to email or SMS marketing in Shopify, so Easy CRM
-                  will not message them. If they re-subscribe, the status syncs back here
-                  automatically.
-                </s-paragraph>
-              </s-banner>
-            ) : null}
-            {data.brevoConnected ? (
-              <ComposeMessage
-                heading="Send a message"
-                // Consent gates the channel in the UI as well as on the server, so the merchant
-                // is never offered a send that would only be recorded as skipped.
-                canEmail={Boolean(contact.email) && emailAllowed}
-                canSms={Boolean(contact.phone) && smsAllowed}
-                previewVars={data.previewVars}
-                templates={data.templates}
-                actionValue="sendMessage"
-                submitLabel="Send message"
-              />
-            ) : (
-              <s-stack direction="block" gap="base" alignItems="center">
-                <s-paragraph color="subdued">
-                  Connect Brevo in Settings to send email and SMS to this contact.
-                </s-paragraph>
-                <s-button href="/app/settings">Go to Settings</s-button>
-              </s-stack>
-            )}
-          </s-section>
-        </>
-      )}
-
       {/* ACTIVITY -------------------------------------------------------- */}
       {tab === "Activity" && (
         <s-section heading="Activity timeline">
@@ -1094,10 +1078,19 @@ export default function ContactDetail() {
             ) : (
               <s-stack direction="block" gap="small-200">
                 {filteredTimeline.map((item) => (
-                  <s-box key={item.id} padding="small-200" borderRadius="base" background="subdued">
+                  <s-box
+                    key={item.id}
+                    padding="small-200"
+                    borderRadius="base"
+                    background="subdued"
+                  >
                     <s-stack direction="inline" gap="base" alignItems="start">
                       <s-icon
-                        type={isActivityType(item.type) ? ACTIVITY_TYPE_META[item.type].icon : "info"}
+                        type={
+                          isActivityType(item.type)
+                            ? ACTIVITY_TYPE_META[item.type].icon
+                            : "info"
+                        }
                       />
                       <s-stack direction="block" gap="small-500">
                         <s-text type="strong">
@@ -1107,7 +1100,9 @@ export default function ContactDetail() {
                         </s-text>
                         <s-text>{describeTimeline(item)}</s-text>
                       </s-stack>
-                      <s-text color="subdued">{formatDateTime(item.occurredAt)}</s-text>
+                      <s-text color="subdued">
+                        {formatDateTime(item.occurredAt)}
+                      </s-text>
                     </s-stack>
                   </s-box>
                 ))}
@@ -1138,23 +1133,10 @@ export default function ContactDetail() {
               <s-text>
                 <s-text type="strong">Email: </s-text>
                 {contact.email ?? "—"}
-                {live?.verifiedEmail ? " (verified)" : ""}
               </s-text>
               <s-text>
                 <s-text type="strong">Phone: </s-text>
                 {contact.phone ?? "—"}
-              </s-text>
-              <s-text>
-                <s-text type="strong">Email marketing: </s-text>
-                <s-badge tone={consentTone(emailConsentState)}>
-                  {consentLabel(emailConsentState)}
-                </s-badge>
-              </s-text>
-              <s-text>
-                <s-text type="strong">SMS marketing: </s-text>
-                <s-badge tone={consentTone(smsConsentState)}>
-                  {consentLabel(smsConsentState)}
-                </s-badge>
               </s-text>
               {contact.source && (
                 <s-text>
@@ -1176,7 +1158,10 @@ export default function ContactDetail() {
           </s-section>
 
           <s-section heading="Preferences">
-            <PreferenceEditor contactId={contact.id} preferences={data.preferences} />
+            <PreferenceEditor
+              contactId={contact.id}
+              preferences={data.preferences}
+            />
           </s-section>
 
           {live?.defaultAddress?.formatted && (

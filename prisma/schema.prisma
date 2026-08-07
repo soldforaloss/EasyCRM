@@ -11,7 +11,7 @@
 //   - No native `enum` types — "enum" fields are String + a TS union defined in
 //     app/lib/crm/constants.ts. Allowed values are documented at each field.
 //   - JSON columns are String (store JSON.stringify) — see Activity.payload, Segment.criteria.
-//   - `String` maps to Postgres `text` (unbounded), so long note/message bodies are safe.
+//   - `String` maps to Postgres `text` (unbounded), so long note bodies are safe.
 
 generator client {
   provider = "prisma-client-js"
@@ -61,13 +61,6 @@ model Contact {
   email     String?
   phone     String?
 
-  // Marketing consent, mirrored from Shopify and ENFORCED at send time (see DECISIONS.md §10).
-  // Values are Shopify's CustomerEmailMarketingState / CustomerSmsMarketingState:
-  //   SUBSCRIBED | NOT_SUBSCRIBED | PENDING | UNSUBSCRIBED | REDACTED | INVALID
-  // NULL means "never synced" and is treated as NOT consented — fail closed.
-  emailMarketingState String?
-  smsMarketingState   String?
-
   // Lightweight cached spend signals (see DECISIONS.md §3) — for list filter/sort only.
   // `amountSpent` is a non-authoritative Float cache key so the list can sort/filter spend
   // numerically; the authoritative money value is fetched live on the detail page.
@@ -91,7 +84,6 @@ model Contact {
   notes            Note[]
   activities       Activity[]
   tasks            Task[]
-  messageLogs      MessageLog[]
   processedOrders  ProcessedOrder[]
   visits           Visit[]
   contactLocations ContactLocation[]
@@ -151,7 +143,7 @@ model Activity {
   id         String   @id @default(cuid())
   shop       String
   contactId  String
-  type       String // NOTE | EMAIL_SENT | SMS_SENT | ORDER_PLACED | STAGE_CHANGED | TASK | SYSTEM
+  type       String // NOTE | ORDER_PLACED | STAGE_CHANGED | TASK | OUTREACH_* | SYSTEM
   payload    String? // JSON.stringify(...) — see app/lib/crm/activity helpers
   occurredAt DateTime @default(now())
   createdAt  DateTime @default(now())
@@ -193,91 +185,13 @@ model Segment {
   @@index([shop])
 }
 
-model MessageTemplate {
-  id        String   @id @default(cuid())
-  shop      String
-  name      String
-  channel   String // EMAIL | SMS
-  subject   String? // email only
-  body      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  messageLogs MessageLog[]
-
-  @@index([shop, channel])
-}
-
-model MessageLog {
-  id                String   @id @default(cuid())
-  shop              String
-  contactId         String
-  channel           String // EMAIL | SMS
-  direction         String   @default("OUTBOUND") // OUTBOUND | INBOUND
-  templateId        String?
-  subject           String?
-  bodySnapshot      String
-  status            String   @default("QUEUED") // QUEUED | SENT | FAILED | SKIPPED (outbound only; ignored for inbound)
-  /// Reason a send was suppressed without being attempted (status = SKIPPED). One of
-  /// SkipReason in constants.ts: NO_CONSENT | NO_ADDRESS | INVALID_PHONE.
-  skipReason        String?
-  /// Set when this row belongs to a bulk send, so progress can be aggregated per batch.
-  batchId           String?
-  providerMessageId String? // Brevo id for OUR outbound send
-  // Brevo Conversations per-message id for INBOUND dedup. Null for outbound rows; engines treat
-  // NULLs as distinct in unique indexes, so many outbound NULLs coexist (DECISIONS.md §2).
-  providerEventId   String?
-  error             String?
-  sentByStaffId     String?
-  createdAt         DateTime @default(now())
-
-  contact  Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  template MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  batch    MessageBatch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
-
-  @@unique([shop, providerEventId])
-  /// One row per (batch, contact) — the idempotency guard that makes a retried bulk-send job
-  /// unable to double-send. NULLs are distinct, so non-bulk rows are unconstrained.
-  @@unique([batchId, contactId])
-  @@index([shop, contactId])
-  @@index([shop, createdAt])
-  @@index([batchId])
-}
-
-/// A bulk send. Recipients are fanned out into one Job per contact; this row aggregates progress
-/// so the UI can poll a single record. See DECISIONS.md §11.
-model MessageBatch {
-  id               String  @id @default(cuid())
-  shop             String
-  channel          String // EMAIL | SMS
-  subject          String?
-  body             String
-  templateId       String?
-  createdByStaffId String?
-  /// Human label for the recipient source, e.g. `segment "VIPs"` or "42 selected contact(s)".
-  label            String?
-
-  total   Int @default(0)
-  sent    Int @default(0)
-  failed  Int @default(0)
-  skipped Int @default(0)
-
-  status    String   @default("RUNNING") // RUNNING | DONE
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  messageLogs MessageLog[]
-
-  @@index([shop, createdAt])
-}
-
 /// Durable background job queue (see DECISIONS.md §11). Deliberately DB-backed rather than
 /// Redis-backed so the app needs no infrastructure beyond Postgres. Claimed with an optimistic
 /// compare-and-set on `status`, so multiple app instances can run workers safely.
 model Job {
   id     String @id @default(cuid())
   shop   String
-  type   String // SEND_ONE | BACKFILL_CUSTOMERS | BACKFILL_ORDERS
+  type   String // BACKFILL_CUSTOMERS | BACKFILL_ORDERS
   status String @default("PENDING") // PENDING | RUNNING | DONE | FAILED
 
   payload String // JSON.stringify(...) — shape depends on `type`
@@ -435,28 +349,6 @@ model DataRequest {
 model ShopSettings {
   id   String @id @default(cuid())
   shop String @unique
-
-  // Brevo BYOK — ciphertext only (AES-256-GCM "iv:tag:ciphertext" base64 bundle). Never plaintext.
-  brevoApiKeyEncrypted String?
-  brevoConnected       Boolean @default(false)
-  brevoAccountEmail    String? // validated account email, for display only
-  brevoSenderEmail     String?
-  brevoSenderName      String?
-  brevoSmsSender       String?
-
-  // --- Marketing compliance (see DECISIONS.md §10) ---
-  // CAN-SPAM requires a valid physical postal address in every marketing email, and a working
-  // opt-out mechanism. Marketing email sends are BLOCKED until `businessAddress` is set.
-  businessAddress String?
-  /// Merchant-hosted unsubscribe page. When null, the footer falls back to a mailto: opt-out
-  /// addressed to the configured sender.
-  unsubscribeUrl  String?
-
-  // Inbound (two-way) messaging via Brevo Conversations webhooks. The token is the secret in the
-  // per-shop webhook URL (capability URL); the optional secret is an extra basic-auth check,
-  // encrypted at rest like the API key. See DECISIONS.md §5 + §9.
-  brevoInboundToken  String? @unique
-  brevoInboundSecret String?
 
   // Optional override of lifecycle stages (JSON-as-String array). Null => defaults.
   lifecycleStages String?

@@ -45,7 +45,7 @@ describe("logOutreach", () => {
   it("rejects an invalid activity type before writing", async () => {
     await expect(
       logOutreach("shop.example", "contact-1", {
-        type: "EMAIL_SENT",
+        type: "NOTE",
         note: "not outreach",
         staffId: "staff-7",
       }),

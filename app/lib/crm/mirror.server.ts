@@ -460,10 +460,6 @@ export async function refreshContactFromShopify(
       ordersCount: fields.numberOfOrders,
       ...(fields.currencyCode ? { currencyCode: fields.currencyCode } : {}),
       ...(fields.lastOrderAt ? { lastOrderAt: new Date(fields.lastOrderAt) } : {}),
-      // Consent is written unconditionally (including back to null) — an opt-out MUST be able to
-      // clear a previously granted consent, so this is never spread-guarded. See DECISIONS.md §10.
-      emailMarketingState: fields.emailMarketingState,
-      smsMarketingState: fields.smsMarketingState,
       lastSyncedAt: new Date(),
     },
   });
@@ -590,8 +586,6 @@ export async function backfillContacts(
           lastName: node.lastName,
           email: node.email,
           phone: node.phone,
-          emailMarketingState: node.emailMarketingState,
-          smsMarketingState: node.smsMarketingState,
           amountSpent: amount,
           ordersCount: toInt(node.numberOfOrders) ?? 0,
           currencyCode: node.amountSpent?.currencyCode ?? null,
@@ -604,8 +598,6 @@ export async function backfillContacts(
           lastName: node.lastName,
           email: node.email,
           phone: node.phone,
-          emailMarketingState: node.emailMarketingState,
-          smsMarketingState: node.smsMarketingState,
           amountSpent: amount,
           ordersCount: toInt(node.numberOfOrders) ?? 0,
           currencyCode: node.amountSpent?.currencyCode ?? null,

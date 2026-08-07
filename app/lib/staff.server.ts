@@ -1,7 +1,7 @@
 /**
  * Staff attribution. SERVER ONLY. See DECISIONS.md §13.
  *
- * The CRM records who wrote a note, who owns a contact and who sent a message. This app uses
+ * The CRM records who wrote a note, who owns a contact, and who logged outreach. This app uses
  * OFFLINE Shopify tokens, so `session.onlineAccessInfo` is not populated and cannot be the
  * source of that identity.
  *

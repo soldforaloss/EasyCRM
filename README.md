@@ -14,8 +14,10 @@ purchase history and size preferences, then log follow-up outreach. Visits depen
 attaching the customer to the Shopify POS order; guest sales and non-purchase walk-ins cannot be
 identified. The store selector persists a home store when Shopify supplies a verified staff id.
 
-The app also mirrors customers locally for fast list/search, shows live order history, and supports
-BYOK email + SMS via **Brevo**. See [`DECISIONS.md`](./DECISIONS.md) for architecture decisions.
+The app also mirrors customers locally for fast list/search, shows live order history, and keeps a
+long-term Activity timeline for notes, tasks, purchases, and staff-logged outreach. Staff contact
+customers from their own devices; Easy CRM records the interaction but never sends or receives it.
+See [`DECISIONS.md`](./DECISIONS.md) for architecture decisions.
 
 ### Required environment variables
 
@@ -25,7 +27,6 @@ BYOK email + SMS via **Brevo**. See [`DECISIONS.md`](./DECISIONS.md) for archite
 | `SHOPIFY_APP_URL` | yes | App URL / tunnel URL (set by the CLI in dev). |
 | `SCOPES` | optional | Falls back to `shopify.app.toml` (`read_customers,read_orders,read_locations`). |
 | `DATABASE_URL` | yes | **PostgreSQL** connection string. No default — the app throws at boot without it. |
-| `ENCRYPTION_KEY` | yes | 32-byte secret (64 hex chars or 32-byte base64) used to AES-256-GCM encrypt the Brevo API key at rest. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
 | `SENTRY_DSN` | optional | Enables error reporting. Requires `npm i @sentry/node`; without it the app logs and continues. |
 | `LOG_LEVEL` | optional | `debug` \| `info` \| `warn` \| `error`. Defaults to `info` in production. |
 | `RUN_JOB_WORKER` | optional | Set `false` to disable the in-process background worker on an instance. |
@@ -43,7 +44,7 @@ sequence.
 
 ```shell
 docker compose up -d db    # local Postgres on :5432
-cp .env.example .env       # then fill in ENCRYPTION_KEY
+cp .env.example .env       # then add your local Shopify values
 npx prisma migrate deploy  # apply the schema
 npm run dev                # shopify app dev (embedded)
 ```
@@ -55,21 +56,21 @@ npm run dev          # shopify app dev (embedded)
 npm run setup        # prisma generate && prisma migrate deploy (prod)
 npx prisma migrate dev   # create/apply a migration in dev
 npm run typecheck    # react-router typegen && tsc --noEmit
-npm run test         # vitest unit tests (consent gate, crypto, queue, phone, merge, ...)
+npm run test         # vitest unit tests
 npm run lint         # eslint
 npm run build        # production build
 ```
 
-### Marketing consent
+### Manual outreach logging
 
-Easy CRM only messages customers whose Shopify marketing state is `SUBSCRIBED`. Everyone else is
-skipped and recorded as `SKIPPED / NO_CONSENT` on their timeline — this is enforced server-side in
-`sendOneToContact()` and cannot be bypassed by a caller. Email sending additionally requires a
-business postal address in Settings (CAN-SPAM). See `DECISIONS.md` §10.
+Staff make calls, speak with customers in person, and send texts from their own devices. Afterward,
+they log the interaction on the contact or Orders view as `OUTREACH_CALL`,
+`OUTREACH_IN_PERSON`, or `OUTREACH_TEXT`. Easy CRM stores those Activity rows as the durable record;
+it does not transmit or receive the communication.
 
 ### Background jobs
 
-Bulk sends and the install backfill run as `Job` rows drained by an in-process worker
+Customer and order backfills run as `Job` rows drained by an in-process worker
 (`app/lib/jobs/`). This requires a long-running process — the provided Dockerfile qualifies; a
 freeze-between-requests serverless platform does not. See `DECISIONS.md` §11.
 
@@ -89,12 +90,9 @@ has run against a real Shopify store** — do this before launch:
 6. Train store staff to attach customers to every eligible Shopify POS sale; confirm the sale
    appears in the correct store's Today view.
 7. Trigger each of the 8 webhook topics and confirm HMAC validation passes and the mirror updates.
-8. Connect Brevo, set the sender **and** business address, send a test email — confirm the postal
-   address, unsubscribe link and `List-Unsubscribe` header arrive in the received message.
-9. Send to a mixed group and confirm non-subscribed contacts are skipped, not messaged.
-10. Verify a `customers/data_request` lands at `/app/privacy` and downloads.
-11. Enable billing (`DECISIONS.md` §6) if the app will be paid.
-12. Run through Shopify's App Store review checklist.
+8. Verify a `customers/data_request` lands at `/app/privacy` and downloads.
+9. Enable billing (`DECISIONS.md` §6) if the app will be paid.
+10. Run through Shopify's App Store review checklist.
 
 ### Enabling billing later
 

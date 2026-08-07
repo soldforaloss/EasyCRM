@@ -1,5 +1,5 @@
 /**
- * Small, pure formatting helpers shared by UI and message rendering.
+ * Small, pure formatting helpers shared by the UI.
  * No DB / env / Shopify imports — safe everywhere.
  */
 

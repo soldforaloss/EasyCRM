@@ -4,9 +4,8 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { Form, useFetcher, useLoaderData, useNavigate } from "react-router";
+import { Form, useFetcher, useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
   listContacts,
@@ -17,7 +16,11 @@ import { addTagToContacts, listTags } from "../lib/crm/tags.server";
 import { backfillContacts } from "../lib/crm/mirror.server";
 import { enqueueJob } from "../lib/jobs/queue.server";
 import { syncLocations } from "../lib/shopify/locations.server";
-import { createSegment, deleteSegment, listSegments } from "../lib/crm/segments.server";
+import {
+  createSegment,
+  deleteSegment,
+  listSegments,
+} from "../lib/crm/segments.server";
 import {
   contactListParamsToSearch,
   hasActiveFilter,
@@ -72,8 +75,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     page: list.page,
     pageCount: list.pageCount,
     pageSize: list.pageSize,
-    tags: tags.map((t) => ({ id: t.id, name: t.name, count: t._count.contacts })),
-    segments: segments.map((s) => ({ id: s.id, name: s.name, criteria: s.criteria })),
+    tags: tags.map((t) => ({
+      id: t.id,
+      name: t.name,
+      count: t._count.contacts,
+    })),
+    segments: segments.map((s) => ({
+      id: s.id,
+      name: s.name,
+      criteria: s.criteria,
+    })),
     locations,
     locationNames: Object.fromEntries(
       locations.map((location) => [location.legacyId, location.name]),
@@ -100,14 +111,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           dedupeKey: `backfill:orders:manual:${new Date().toISOString().slice(0, 13)}`,
           maxAttempts: 5,
         });
-        return { ok: true, toast: `Synced ${result.processed} customers from Shopify.` };
+        return {
+          ok: true,
+          toast: `Synced ${result.processed} customers from Shopify.`,
+        };
       }
       case "bulkStage": {
         const ids = form.getAll("contactId").map(String);
         const stage = String(form.get("stage") ?? "");
         const owned = await resolveOwnedContactIds(shop, ids);
         for (const id of owned) await setLifecycleStage(shop, id, stage);
-        return { ok: true, toast: `Updated stage for ${owned.length} contact(s).` };
+        return {
+          ok: true,
+          toast: `Updated stage for ${owned.length} contact(s).`,
+        };
       }
       case "bulkTag": {
         const ids = form.getAll("contactId").map(String);
@@ -136,17 +153,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return { ok: false, toast: "Unknown action." };
     }
   } catch (error) {
-    return { ok: false, toast: error instanceof Error ? error.message : "Action failed." };
+    return {
+      ok: false,
+      toast: error instanceof Error ? error.message : "Action failed.",
+    };
   }
 };
 
 export default function ContactsList() {
   const data = useLoaderData<typeof loader>();
-  const shopify = useAppBridge();
   const bulkFetcher = useFetcher<typeof action>();
   const resyncFetcher = useFetcher<typeof action>();
   const bulkFormRef = useRef<HTMLFormElement | null>(null);
-  const navigate = useNavigate();
 
   // Submit the bulk form (which contains the selected-row checkboxes) for a chosen action.
   function submitBulk(action: string) {
@@ -155,20 +173,6 @@ export default function ContactsList() {
     const fd = new FormData(form);
     fd.set("_action", action);
     bulkFetcher.submit(fd, { method: "post" });
-  }
-
-  // Navigate to the bulk-message composer with the checked contact ids.
-  function messageSelected() {
-    const form = bulkFormRef.current;
-    if (!form) return;
-    const ids = new FormData(form).getAll("contactId").map(String);
-    if (ids.length === 0) {
-      shopify.toast.show("Select at least one contact first.", { isError: true });
-      return;
-    }
-    const sp = new URLSearchParams();
-    ids.forEach((id) => sp.append("id", id));
-    navigate(`/app/contacts/bulk?${sp.toString()}`);
   }
 
   // Surface each action source's result as a toast independently (no `??` coalescing — a stale
@@ -183,7 +187,8 @@ export default function ContactsList() {
     const next = contactListParamsToSearch({
       ...params,
       sortField: field,
-      sortDir: params.sortField === field && params.sortDir === "asc" ? "desc" : "asc",
+      sortDir:
+        params.sortField === field && params.sortDir === "asc" ? "desc" : "asc",
       page: 1,
     });
     return `?${next.toString()}`;
@@ -204,7 +209,11 @@ export default function ContactsList() {
     <s-page heading="Contacts">
       <resyncFetcher.Form method="post" slot="primary-action">
         <input type="hidden" name="_action" value="resync" />
-        <s-button type="submit" variant="primary" {...(resyncing ? { loading: true } : {})}>
+        <s-button
+          type="submit"
+          variant="primary"
+          {...(resyncing ? { loading: true } : {})}
+        >
           Sync from Shopify
         </s-button>
       </resyncFetcher.Form>
@@ -229,7 +238,9 @@ export default function ContactsList() {
                     name="stage"
                     value={stage}
                     label={LIFECYCLE_STAGE_META[stage].label}
-                    {...(params.stages?.includes(stage) ? { checked: true } : {})}
+                    {...(params.stages?.includes(stage)
+                      ? { checked: true }
+                      : {})}
                   />
                 ))}
               </s-stack>
@@ -244,7 +255,9 @@ export default function ContactsList() {
                     name="spend"
                     value={tier.id}
                     label={tier.label}
-                    {...(params.spendTiers?.includes(tier.id) ? { checked: true } : {})}
+                    {...(params.spendTiers?.includes(tier.id)
+                      ? { checked: true }
+                      : {})}
                   />
                 ))}
               </s-stack>
@@ -260,7 +273,9 @@ export default function ContactsList() {
                       name="tag"
                       value={tag.id}
                       label={`${tag.name} (${tag.count})`}
-                      {...(params.tagIds?.includes(tag.id) ? { checked: true } : {})}
+                      {...(params.tagIds?.includes(tag.id)
+                        ? { checked: true }
+                        : {})}
                     />
                   ))}
                 </s-stack>
@@ -315,13 +330,22 @@ export default function ContactsList() {
               <input key={t} type="hidden" name="tag" value={t} />
             ))}
             {(params.locationIds ?? []).map((locationId) => (
-              <input key={locationId} type="hidden" name="location" value={locationId} />
+              <input
+                key={locationId}
+                type="hidden"
+                name="location"
+                value={locationId}
+              />
             ))}
             {(params.spendTiers ?? []).map((s) => (
               <input key={s} type="hidden" name="spend" value={s} />
             ))}
             <s-stack direction="inline" gap="base" alignItems="end">
-              <s-text-field name="segmentName" label="Save current filter as segment" placeholder="Segment name" />
+              <s-text-field
+                name="segmentName"
+                label="Save current filter as segment"
+                placeholder="Segment name"
+              />
               <s-button type="submit" variant="secondary">
                 Save segment
               </s-button>
@@ -334,18 +358,22 @@ export default function ContactsList() {
             <s-text type="strong">Saved segments</s-text>
             <s-stack direction="inline" gap="base">
               {data.segments.map((seg) => {
-                const sp = new URLSearchParams(filterCriteriaToSearch(seg.criteria));
+                const sp = new URLSearchParams(
+                  filterCriteriaToSearch(seg.criteria),
+                );
                 return (
-                  <s-stack key={seg.id} direction="inline" gap="small-500" alignItems="center">
-                    <s-button href={`/app/contacts?${sp.toString()}`} variant="tertiary">
+                  <s-stack
+                    key={seg.id}
+                    direction="inline"
+                    gap="small-500"
+                    alignItems="center"
+                  >
+                    <s-button
+                      href={`/app/contacts?${sp.toString()}`}
+                      variant="tertiary"
+                    >
                       {seg.name}
                     </s-button>
-                    <s-button
-                      href={`/app/contacts/bulk?segment=${seg.id}`}
-                      variant="tertiary"
-                      icon="email"
-                      accessibilityLabel={`Message segment ${seg.name}`}
-                    />
                     <ConfirmAction
                       id={`confirm-del-seg-${seg.id}`}
                       triggerIcon="delete"
@@ -364,7 +392,9 @@ export default function ContactsList() {
       </s-section>
 
       {/* Results --------------------------------------------------------- */}
-      <s-section heading={`${data.total} contact${data.total === 1 ? "" : "s"}`}>
+      <s-section
+        heading={`${data.total} contact${data.total === 1 ? "" : "s"}`}
+      >
         {data.rows.length === 0 ? (
           <s-stack direction="block" gap="base">
             <s-paragraph color="subdued">
@@ -377,7 +407,11 @@ export default function ContactsList() {
             ) : (
               <resyncFetcher.Form method="post">
                 <input type="hidden" name="_action" value="resync" />
-                <s-button type="submit" variant="primary" {...(resyncing ? { loading: true } : {})}>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(resyncing ? { loading: true } : {})}
+                >
                   Sync from Shopify
                 </s-button>
               </resyncFetcher.Form>
@@ -389,10 +423,14 @@ export default function ContactsList() {
               <s-table-header-row>
                 <s-table-header>Select</s-table-header>
                 <s-table-header>
-                  <s-link href={sortHref("name")}>Name{sortIndicator("name")}</s-link>
+                  <s-link href={sortHref("name")}>
+                    Name{sortIndicator("name")}
+                  </s-link>
                 </s-table-header>
                 <s-table-header>
-                  <s-link href={sortHref("email")}>Email{sortIndicator("email")}</s-link>
+                  <s-link href={sortHref("email")}>
+                    Email{sortIndicator("email")}
+                  </s-link>
                 </s-table-header>
                 <s-table-header>
                   <s-link href={sortHref("lifecycleStage")}>
@@ -440,21 +478,33 @@ export default function ContactsList() {
                     </s-table-cell>
                     <s-table-cell>
                       {r.lastVisitLocationId
-                        ? data.locationNames[r.lastVisitLocationId] ?? "Unknown store"
+                        ? (data.locationNames[r.lastVisitLocationId] ??
+                          "Unknown store")
                         : "—"}
                     </s-table-cell>
                     <s-table-cell>{r.ordersCount}</s-table-cell>
-                    <s-table-cell>{formatMoney(r.amountSpent, r.currencyCode)}</s-table-cell>
-                    <s-table-cell>{r.lastOrderAt ? formatDate(r.lastOrderAt) : "—"}</s-table-cell>
+                    <s-table-cell>
+                      {formatMoney(r.amountSpent, r.currencyCode)}
+                    </s-table-cell>
+                    <s-table-cell>
+                      {r.lastOrderAt ? formatDate(r.lastOrderAt) : "—"}
+                    </s-table-cell>
                   </s-table-row>
                 ))}
               </s-table-body>
             </s-table>
 
             {/* Bulk actions operate on the checked rows above. */}
-            <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+              background="subdued"
+            >
               <s-stack direction="block" gap="small-200">
-                <s-text type="strong">Bulk actions for selected contacts</s-text>
+                <s-text type="strong">
+                  Bulk actions for selected contacts
+                </s-text>
                 <s-stack direction="inline" gap="base" alignItems="end">
                   <s-select name="stage" label="Set stage">
                     {LIFECYCLE_STAGES.map((stage) => (
@@ -463,15 +513,20 @@ export default function ContactsList() {
                       </s-option>
                     ))}
                   </s-select>
-                  <s-button onClick={() => submitBulk("bulkStage")}>Apply stage</s-button>
+                  <s-button onClick={() => submitBulk("bulkStage")}>
+                    Apply stage
+                  </s-button>
                 </s-stack>
                 <s-stack direction="inline" gap="base" alignItems="end">
-                  <s-text-field name="tagName" label="Add tag" placeholder="e.g. Wholesale" />
-                  <s-button onClick={() => submitBulk("bulkTag")}>Add tag</s-button>
+                  <s-text-field
+                    name="tagName"
+                    label="Add tag"
+                    placeholder="e.g. Wholesale"
+                  />
+                  <s-button onClick={() => submitBulk("bulkTag")}>
+                    Add tag
+                  </s-button>
                 </s-stack>
-                <s-button variant="primary" onClick={messageSelected}>
-                  Message selected
-                </s-button>
               </s-stack>
             </s-box>
           </bulkFetcher.Form>
@@ -504,7 +559,6 @@ export default function ContactsList() {
           </s-stack>
         )}
       </s-section>
-
     </s-page>
   );
 }
@@ -523,7 +577,8 @@ function filterCriteriaToSearch(criteria: string): string {
     if (f.search) sp.set("q", f.search);
     for (const s of f.stages ?? []) sp.append("stage", s);
     for (const t of f.tagIds ?? []) sp.append("tag", t);
-    for (const locationId of f.locationIds ?? []) sp.append("location", locationId);
+    for (const locationId of f.locationIds ?? [])
+      sp.append("location", locationId);
     for (const s of f.spendTiers ?? []) sp.append("spend", s);
     return sp.toString();
   } catch {

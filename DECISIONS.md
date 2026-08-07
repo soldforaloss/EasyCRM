@@ -1,4 +1,4 @@
-# DECISIONS — Easy CRM (embedded Shopify CRM + Brevo BYOK messaging)
+# DECISIONS — Easy CRM (embedded Shopify clienteling CRM)
 
 This file records the scaffold facts discovered up front and every non-obvious assumption
 made while building. Read it before changing foundational config.
@@ -107,6 +107,8 @@ at 2026-04).
 
 ## 5. Secrets & encryption
 
+[Superseded 2026-08-06 - messaging stack removed]
+
 - Brevo API key is **BYOK**, stored **encrypted at rest** with **AES-256-GCM**. The key for
   encryption comes from env `ENCRYPTION_KEY` (32-byte secret, hex or base64). Ciphertext is
   stored as a single `iv:authTag:ciphertext` base64 bundle in `ShopSettings.brevoApiKeyEncrypted`.
@@ -147,6 +149,8 @@ embedded-install verification is left for the user's Partner account + dev store
 
 ## 9. Inbound (two-way) messaging — Brevo Conversations webhooks
 
+[Superseded 2026-08-06 - messaging stack removed]
+
 Receiving customer email/SMS replies uses **Brevo Conversations webhooks**
 (`conversationStarted`/`conversationFragment`/`conversationTranscript`), one endpoint that captures
 inbound across channels (email + two-way SMS via a Brevo dedicated number, plus chat/social we
@@ -180,6 +184,8 @@ The sections below record the changes made to take the app from "feature-complet
 "deployable". They supersede §2, §6 and §8 where they conflict.
 
 ## 10. Marketing consent is enforced, not just displayed
+
+[Superseded 2026-08-06 - messaging stack removed]
 
 **Problem.** The app fetched `emailMarketingState` / `smsMarketingState` from Shopify and rendered
 them on the contact detail page, but the send path never consulted them. Every contact with an
@@ -216,6 +222,8 @@ a near-certain App Store rejection.
   merchant is messaging themselves with fixed boilerplate to verify configuration.
 
 ## 11. Bulk send is a durable job queue, not an inline loop
+
+[Superseded 2026-08-06 - messaging stack removed]
 
 **Problem.** `sendBulk` iterated recipients inside the HTTP request — SMS strictly sequentially, one
 Brevo call at a time — against a segment resolved at `pageSize: 1000`. Any real campaign would
@@ -452,3 +460,16 @@ Shopify API call at request time and shows only the history already present in t
 An order without a resolved contact renders as a muted **Guest** with no contact link or outreach
 action, so guest sales do not crash the feed. Contact-backed outreach reuses the append-only manual
 activity path from §19 with session-token staff attribution; it does not send a message.
+
+## 23. Messaging stack removed (2026-08-06)
+
+Easy CRM is an in-store clienteling record, not a communication transport. Staff contact customers
+from their personal devices by call, in-person conversation, or text, then log the completed
+interaction in the app. The append-only `OUTREACH_CALL`, `OUTREACH_IN_PERSON`, and `OUTREACH_TEXT`
+Activity rows remain the long-term record.
+
+The dormant email/SMS send and receive implementation was removed in full, including provider
+credentials, templates, message logs, batches, inbound webhooks, compose/thread UI, marketing-state
+mirroring, and the per-recipient send job. The existing background queue remains for customer and
+order backfills. Sections 5, 9, 10, and 11 are retained only as historical context and are
+superseded by this decision.

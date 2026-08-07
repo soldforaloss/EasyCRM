@@ -360,43 +360,26 @@ describe("recordOrderFromWebhook", () => {
   });
 });
 
-describe("refreshContactFromShopify (consent)", () => {
+describe("refreshContactFromShopify", () => {
   const admin = { graphql: vi.fn() };
 
-  it("writes the current marketing states onto the mirror", async () => {
+  it("writes the current spend and order fields onto the mirror", async () => {
     syncFieldsMock.mockResolvedValue({
       amountSpent: 250,
       currencyCode: "USD",
       numberOfOrders: 3,
       lastOrderAt: "2026-01-01T00:00:00Z",
-      emailMarketingState: "SUBSCRIBED",
-      smsMarketingState: "NOT_SUBSCRIBED",
     });
 
     await refreshContactFromShopify(admin, "s", "gid://shopify/Customer/1");
 
     const data = prismaMock.contact.updateMany.mock.calls[0][0].data;
-    expect(data.emailMarketingState).toBe("SUBSCRIBED");
-    expect(data.smsMarketingState).toBe("NOT_SUBSCRIBED");
-  });
-
-  it("clears consent back to null when the customer opts out", async () => {
-    // Consent must be written unconditionally: if an opt-out were spread-guarded away, a
-    // previously-granted consent would persist forever and we would keep messaging them.
-    syncFieldsMock.mockResolvedValue({
-      amountSpent: 0,
-      currencyCode: null,
-      numberOfOrders: 0,
-      lastOrderAt: null,
-      emailMarketingState: null,
-      smsMarketingState: null,
+    expect(data).toMatchObject({
+      amountSpent: 250,
+      currencyCode: "USD",
+      ordersCount: 3,
+      lastOrderAt: new Date("2026-01-01T00:00:00Z"),
     });
-
-    await refreshContactFromShopify(admin, "s", "gid://shopify/Customer/1");
-
-    const data = prismaMock.contact.updateMany.mock.calls[0][0].data;
-    expect(data).toHaveProperty("emailMarketingState", null);
-    expect(data).toHaveProperty("smsMarketingState", null);
   });
 
   it("leaves the mirror untouched when the live read fails", async () => {

@@ -3,11 +3,10 @@
  * Lists are served from the local mirror for speed (see DECISIONS.md §3). SERVER ONLY.
  */
 
-import type { Contact, Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import prisma from "../../db.server";
 import {
   DEFAULT_LIFECYCLE_STAGE,
-  canReceive,
   isLifecycleStage,
   spendTierById,
   type LifecycleStage,
@@ -22,7 +21,10 @@ const contactWithTags = {
 export type ContactWithTags = Prisma.ContactGetPayload<typeof contactWithTags>;
 
 /** Build the Prisma `where` for a filter (shop-scoped). */
-function buildWhere(shop: string, params: ContactListParams): Prisma.ContactWhereInput {
+function buildWhere(
+  shop: string,
+  params: ContactListParams,
+): Prisma.ContactWhereInput {
   const and: Prisma.ContactWhereInput[] = [{ shop }];
 
   const search = params.search?.trim();
@@ -153,44 +155,14 @@ export async function getContactByShopifyId(
   });
 }
 
-/**
- * Find a contact by email within a shop using an exact PostgreSQL comparison. Uses the
- * `(shop, email)` index. `findFirst` because the index is non-unique — pick the most recently
- * updated on a collision. Used for inbound matching.
- */
-export async function findContactByEmail(
-  shop: string,
-  email: string,
-): Promise<Contact | null> {
-  const value = email.trim();
-  if (!value) return null;
-  return prisma.contact.findFirst({
-    where: { shop, email: value },
-    orderBy: { updatedAt: "desc" },
-  });
-}
-
-/**
- * Find a contact by phone within a shop. Best-effort: matches against the stored value (callers
- * pass a normalized E.164 string). Uses the `(shop, phone)` index. Used for inbound SMS matching.
- */
-export async function findContactByPhone(
-  shop: string,
-  phone: string,
-): Promise<Contact | null> {
-  const value = phone.trim();
-  if (!value) return null;
-  return prisma.contact.findFirst({
-    where: { shop, phone: value },
-    orderBy: { updatedAt: "desc" },
-  });
-}
-
 export async function countContacts(shop: string): Promise<number> {
   return prisma.contact.count({ where: { shop } });
 }
 
-export async function countContactsSince(shop: string, since: Date): Promise<number> {
+export async function countContactsSince(
+  shop: string,
+  since: Date,
+): Promise<number> {
   return prisma.contact.count({ where: { shop, createdAt: { gte: since } } });
 }
 
@@ -233,69 +205,4 @@ export async function resolveOwnedContactIds(
     select: { id: true },
   });
   return rows.map((r) => r.id);
-}
-
-/** Count how many of the given contacts can receive email / valid SMS (for bulk summaries). */
-export interface ChannelCounts {
-  withEmail: number;
-  withValidPhone: number;
-  /** Consented AND reachable — the number that will actually be sent. */
-  emailReachable: number;
-  smsReachable: number;
-  /** Have the address but are not subscribed, so they will be skipped as NO_CONSENT. */
-  emailNoConsent: number;
-  smsNoConsent: number;
-}
-
-/**
- * Recipient breakdown for the bulk-send screen.
- *
- * Reports reachability and consent separately so the merchant sees why a selection of 500 will
- * only send to 120 *before* they hit send, rather than discovering it in the results.
- */
-export async function getContactChannelCounts(
-  shop: string,
-  ids: string[],
-): Promise<ChannelCounts> {
-  const empty: ChannelCounts = {
-    withEmail: 0,
-    withValidPhone: 0,
-    emailReachable: 0,
-    smsReachable: 0,
-    emailNoConsent: 0,
-    smsNoConsent: 0,
-  };
-  if (ids.length === 0) return empty;
-
-  const rows = await prisma.contact.findMany({
-    where: { shop, id: { in: ids } },
-    select: {
-      email: true,
-      phone: true,
-      emailMarketingState: true,
-      smsMarketingState: true,
-    },
-  });
-  const { normalizeE164 } = await import("../phone");
-
-  const counts = { ...empty };
-  for (const r of rows) {
-    const hasEmail = Boolean(r.email);
-    const hasPhone = normalizeE164(r.phone).ok;
-    if (hasEmail) counts.withEmail += 1;
-    if (hasPhone) counts.withValidPhone += 1;
-
-    if (canReceive("EMAIL", r)) {
-      if (hasEmail) counts.emailReachable += 1;
-    } else if (hasEmail) {
-      counts.emailNoConsent += 1;
-    }
-
-    if (canReceive("SMS", r)) {
-      if (hasPhone) counts.smsReachable += 1;
-    } else if (hasPhone) {
-      counts.smsNoConsent += 1;
-    }
-  }
-  return counts;
 }

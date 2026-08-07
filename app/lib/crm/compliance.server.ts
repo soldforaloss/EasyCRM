@@ -32,8 +32,6 @@ export async function assembleCustomerData(shop: string, customerGid: string) {
       lastName: true,
       email: true,
       phone: true,
-      emailMarketingState: true,
-      smsMarketingState: true,
       amountSpent: true,
       currencyCode: true,
       ordersCount: true,
@@ -61,17 +59,6 @@ export async function assembleCustomerData(shop: string, customerGid: string) {
         select: {
           type: true,
           occurredAt: true,
-          createdAt: true,
-        },
-      },
-      messageLogs: {
-        select: {
-          channel: true,
-          direction: true,
-          subject: true,
-          bodySnapshot: true,
-          status: true,
-          skipReason: true,
           createdAt: true,
         },
       },
@@ -214,7 +201,7 @@ export async function redactCustomer(shop: string, customerGid: string): Promise
   // DataRequest is a denormalized export with no Contact FK, so it must be erased explicitly.
   await prisma.$transaction([
     prisma.task.deleteMany({ where: { shop, contactId: contact.id } }),
-    // Deleting the contact cascades notes, activities, message logs, tags, local orders, visits,
+    // Deleting the contact cascades notes, activities, tags, local orders, visits,
     // location rollups and preferences. Tasks are SetNull, so they are removed explicitly above.
     prisma.contact.deleteMany({ where: { shop, id: contact.id } }),
     prisma.dataRequest.deleteMany({ where: { shop, shopifyCustomerId: customerGid } }),
@@ -224,7 +211,6 @@ export async function redactCustomer(shop: string, customerGid: string): Promise
 /** Delete ALL data for a shop (shop/redact, ~48h after uninstall). */
 export async function redactShop(shop: string): Promise<void> {
   await prisma.$transaction([
-    prisma.messageLog.deleteMany({ where: { shop } }),
     prisma.activity.deleteMany({ where: { shop } }),
     prisma.note.deleteMany({ where: { shop } }),
     prisma.contactTag.deleteMany({ where: { shop } }),
@@ -238,8 +224,6 @@ export async function redactShop(shop: string): Promise<void> {
     prisma.location.deleteMany({ where: { shop } }),
     prisma.staffProfile.deleteMany({ where: { shop } }),
     prisma.segment.deleteMany({ where: { shop } }),
-    prisma.messageTemplate.deleteMany({ where: { shop } }),
-    prisma.messageBatch.deleteMany({ where: { shop } }),
     prisma.dataRequest.deleteMany({ where: { shop } }),
     prisma.job.deleteMany({ where: { shop } }),
     prisma.shopSettings.deleteMany({ where: { shop } }),
